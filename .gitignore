@@ -1,0 +1,84 @@
+# =====================================================================
+# My Digital Persona - .gitignore
+# =====================================================================
+
+# ── 보안 / 인증 정보 (절대 커밋 금지) ──────────────────────────────
+.env
+.env.cloud
+*.env
+!.env.example
+
+# Google OAuth / SA 키
+token.json
+client_secret.json
+*_sa.json
+*service_account*.json
+project-*.json
+
+# SSH 키
+*.pem
+*.key
+id_rsa*
+gcp_key*
+
+# ── Python 빌드 / 캐시 ──────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# ── 가상환경 ────────────────────────────────────────────────────────
+venv/
+env/
+.venv/
+
+# ── Qdrant 데이터 (용량 매우 큼, GB~TB) ────────────────────────────
+qdrant_db/
+qdrant_server_data/
+snapshots/
+# Qdrant 서버 바이너리 (OS별로 다름, 필요 시 재다운)
+qdrant_server/
+
+# ── 처리 상태 DB / 개인정보 ────────────────────────────────────────
+# 로컬 파일 경로 등 개인정보 포함
+processed_files.db
+email_log.db
+kakao_log.db
+
+# ── 백업 데이터 ─────────────────────────────────────────────────────
+backups/
+
+# ── 로그 파일 (운영 중 생성, 커밋 불필요) ──────────────────────────
+*.log
+*.log.*
+ingestion_log.txt
+monitor_overnight.log
+
+# ── 스크린샷 / 임시 이미지 ──────────────────────────────────────────
+kakao_screenshot.png
+kakao2.png
+*.tmp
+
+# ── Qdrant 초기화 마커 (환경마다 다름) ──────────────────────────────
+.qdrant-initialized
+
+# ── IDE / OS ─────────────────────────────────────────────────────────
+.vscode/settings.json
+# .vscode/extensions.json 은 공유 (확장 추천 목록)
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── 대용량 임시 파일 ─────────────────────────────────────────────────
+*.bin
+*.zip
+*.tar.gz
+*.whl

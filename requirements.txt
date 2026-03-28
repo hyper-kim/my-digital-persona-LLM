@@ -1,0 +1,25 @@
+ollama
+openai-whisper
+qdrant-client
+torch
+tqdm
+Pillow
+pdf2image
+llama-index
+llama-index-vector-stores-qdrant
+llama-index-embeddings-huggingface
+pymupdf
+olefile
+sentence-transformers
+gradio
+psutil
+httpx
+beautifulsoup4
+lxml
+python-pptx
+# 카카오톡 PC 자동화 (Windows 전용)
+pywinauto
+pyautogui
+pyperclip
+pygetwindow
+python-dotenv
