@@ -17,9 +17,9 @@ log = logging.getLogger("cleanup")
 
 DRY_RUN = "--dry-run" in sys.argv
 
-PROJ = r"C:\My_Digital_Persona_Own_LLM_Project"
-DB   = os.path.join(PROJ, "processed_files.db")
-QDRANT_PATH = os.path.join(PROJ, "qdrant_db")
+PROJ = os.getenv("PROJECT_DIR", os.path.dirname(os.path.abspath(__file__)))
+DB   = os.getenv("STATE_DB_PATH",   os.path.join(PROJ, "processed_files.db"))
+QDRANT_PATH = os.getenv("QDRANT_PATH", os.path.join(PROJ, "qdrant_db"))
 _env_path = os.path.join(PROJ, ".env")
 if os.path.exists(_env_path):
     with open(_env_path, encoding="utf-8", errors="ignore") as _f:

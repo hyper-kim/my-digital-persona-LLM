@@ -21,9 +21,10 @@ START_COOLDOWN = 180   # VM 시작 후 최소 유지 시간 (초) - 너무 짧�
 CHECK_INTERVAL = 30    # 로그 확인 주기 (초)
 VM_STATUS_INTERVAL = 300  # VM 실제 상태 API 확인 주기 (초) - API 비용 절약
 
+_PROJECT_DIR = os.getenv("PROJECT_DIR", os.path.dirname(os.path.abspath(__file__)))
 LOG_FILE    = os.getenv("LOG_FILE",
-              r"C:\My_Digital_Persona_Own_LLM_Project\ingestion_log.txt")
-MON_LOG     = r"C:\My_Digital_Persona_Own_LLM_Project\vm_monitor.log"
+              os.path.join(_PROJECT_DIR, "ingestion_log.txt"))
+MON_LOG     = os.path.join(_PROJECT_DIR, "vm_monitor.log")
 
 VM_NAME     = os.getenv("GCP_VM_NAME", "")
 VM_ZONE     = os.getenv("GCP_VM_ZONE", "")
