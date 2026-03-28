@@ -136,3 +136,16 @@ if __name__ == "__main__":
     print("  모든 폴더 처리 완료!")
     print(f"  총 임베딩: {count_processed():,} 파일")
     print("="*60)
+
+    # DB 자동 백업 (GCS_BACKUP_BUCKET 설정 시)
+    if os.getenv("GCS_BACKUP_BUCKET"):
+        print("\n  [GCS] DB 백업 시작...")
+        try:
+            sys.path.insert(0, PROJECT_DIR)
+            import importlib
+            _backup_mod = importlib.import_module("_gcs_backup")
+            results = _backup_mod.backup(quiet=False)
+            ok = sum(1 for v in results.values() if v == "ok")
+            print(f"  [GCS] 백업 완료: {ok}/{len(results)} 파일")
+        except Exception as _e:
+            print(f"  [GCS] 백업 실패 (파이프라인에는 영향 없음): {_e}")
