@@ -121,6 +121,27 @@ PDF_CHUNK_PAGES=5                   # 기본값 30 → 5로 축소 (최대 병�
 - **PDF 대용량 청크** → `PDF_CHUNK_PAGES=5`, 2페이지 이상 무조건 분할 (commit c0cb494)
 - **`_vm_monitor.py` 자동 복구** → 404 감지 시 `create_vm()` + `update_env_ip()` 자동 호출
 
+## ⚠️ 미해결 이슈 (파일만 봐서는 알 수 없음)
+
+### 1. SEARCH_MODEL 품질 문제 — 교체 필요
+- `gemma3:12b`를 직접 테스트한 결과: 한국어 응답 매우 느림 + 영어로 답하는 경향
+- **권장 조치**: `.env`에서 `SEARCH_MODEL=qwen3:14b`로 변경 (이미 설치됨, 8.2GB)
+- 현재 코드 기본값은 `gemma3:12b`로 남아 있음 → **아직 미수정**
+
+### 2. 웹크롤 컨텐츠 품질 문제 — URL은 200이지만 내용 빈약
+- **Cornell IRP** (`irp.dpb.cornell.edu/university-factbook/admissions`): 200 OK지만 크롤 결과가 JS 네비게이션 메뉴만 나옴. 실제 편입 통계/GPA 데이터 없음
+- **UPenn catalog** (`catalog.upenn.edu/undergraduate/`): 200 OK지만 학과 목록만 나옴. 편입 요건 텍스트 없음
+- **근본 원인**: 두 사이트 모두 실제 데이터가 JS 렌더링 이후 로드됨 (httpx로는 정적 HTML만 가져옴)
+- **아직 미해결** — 더 나은 대체 URL 탐색 중단된 상태
+
+### 3. Tailscale / UI 접근 설정 현황 (코드에 없는 인프라 상태)
+- **Tailscale**: 설치됨 (v1.96.3), 로그인됨 (계정: kjy6624kss@), IP `100.90.121.102` 고정
+- **방화벽**: `Transfer Chatbot UI 7862` 인바운드 규칙 추가됨 (관리자 권한으로 수동 적용)
+- **자동시작**: 작업 스케줄러 아님 — 시작 프로그램 폴더에 `.lnk` 바로가기로 등록
+  - 경로: `C:\Users\kjy\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\TransferChatbot.lnk`
+  - 로그인 필요 (자동 로그인 미설정) — WOL 후 Windows 잠금화면 해제해야 UI 뜸
+- **UI 로그인 없음**: `5_transfer_ui.py`에서 auth 완전 제거됨 → 접속 시 비밀번호 불필요
+
 ## 코딩 규칙
 - 파이썬 파일은 반드시 `# -X utf8` 인코딩으로 실행
 - 환경변수는 `.env`에서 `python-dotenv`로 로드 (`load_dotenv(override=False)`)
