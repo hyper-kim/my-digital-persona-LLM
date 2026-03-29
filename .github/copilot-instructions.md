@@ -142,6 +142,36 @@ PDF_CHUNK_PAGES=5                   # 기본값 30 → 5로 축소 (최대 병�
   - 로그인 필요 (자동 로그인 미설정) — WOL 후 Windows 잠금화면 해제해야 UI 뜸
 - **UI 로그인 없음**: `5_transfer_ui.py`에서 auth 완전 제거됨 → 접속 시 비밀번호 불필요
 
+## 🔄 현재 작업 상태 — 새 세션 이어받기 체크리스트
+> 이 섹션은 대화 컨텍스트에서만 알 수 있는 "지금 어디까지 했는지" 정보입니다.  
+> 파일만 봐서는 알 수 없는 내용이므로 새 세션 시작 시 반드시 확인하세요.
+
+### VM 상태 (2026-03-29 기준)
+- `mydigitalpersonaembedder` 방금 재생성됨 (Standard, IP `34.24.238.116`)
+- **`vm_setup.sh` 실행 중** — Ubuntu 22.04 + CUDA + Ollama + qwen3-vl:8b 설치 (~10–15분)
+- SSH 접속 가능 여부 확인 후 파이프라인 재시작 필요: `python sequential_run.py`
+- VM SSH 준비 확인: `ssh -i C:\Users\kjy\.ssh\gcp_key_fixed kjy@34.24.238.116`
+- **gcloud CLI 미설치** (확인됨) → GCP 관리는 `_vm_manager.py` REST API로만 수행
+
+### 파이프라인 진행도 (마지막 확인 기준)
+- `processed_files.db` 처리완료: **약 11,224건**, 실패: **약 287건**
+- 한성과고 PDF 실패 13개 → `_retry_empty_onenote.py --all`로 재처리 등록 완료 (다시 실행 불필요)
+- Qdrant `qdrant_db/` 크기: **24.8GB** (SQLite), 벡터 수 미확인 (Qdrant 꺼진 상태)
+- 파이프라인 재시작 시 `sequential_run.py` 사용
+
+### 직접 테스트로 확인된 사실 (코드엔 없음)
+- `gemma3:12b` 한국어 직접 테스트 결과: **영어로만 응답** (한국어 구사 불가 수준)
+  - `.env` `SEARCH_MODEL=qwen3:14b`로 변경 필요 — **아직 미수정**
+  - `qwen3:14b`는 로컬에 설치됨 (8.2GB), 즉시 교체 가능
+- Cornell IRP / UPenn catalog 크롤: 200 OK지만 **JS 렌더링 필요 페이지** → httpx로는 빈 HTML
+  - 실질적 편입 데이터 없음 → 대체 URL 또는 Playwright 도입 검토 필요
+
+### 다음 할 일 (우선순위 순)
+1. VM SSH 접속 확인 → 파이프라인 재시작
+2. `.env` `SEARCH_MODEL=gemma3:12b` → `qwen3:14b` 변경
+3. Cornell IRP / UPenn 크롤 대체 URL 탐색 (JS 렌더링 우회)
+4. `_monitor.py` 띄워서 진행 상황 감시: `python _monitor.py`
+
 ## 코딩 규칙
 - 파이썬 파일은 반드시 `# -X utf8` 인코딩으로 실행
 - 환경변수는 `.env`에서 `python-dotenv`로 로드 (`load_dotenv(override=False)`)
