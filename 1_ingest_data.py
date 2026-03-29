@@ -20,7 +20,8 @@ import queue
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
-from PIL import Image
+from PIL import Image, ImageEnhance
+import io
 from pdf2image import convert_from_path
 from llama_index.core import Document, VectorStoreIndex, StorageContext, SimpleDirectoryReader
 from llama_index.vector_stores.qdrant import QdrantVectorStore
@@ -89,6 +90,7 @@ MAX_AUDIO_WORKERS  = int(os.getenv("MAX_AUDIO_WORKERS",  "1"))
 QUEUE_SIZE = int(os.getenv("QUEUE_SIZE", "200"))
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "1200"))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "200"))
+PDF_CHUNK_PAGES = int(os.getenv("PDF_CHUNK_PAGES", "30"))  # 이 페이지 수 초과 PDF는 30p 단위 청크로 분할 처리
 AUTO_BACKUP_INTERVAL_SEC = int(os.getenv("AUTO_BACKUP_INTERVAL_SEC", "900"))
 BACKUP_ROOT = os.getenv("BACKUP_ROOT", os.path.join(PROJECT_DIR, "backups"))
 
@@ -1143,6 +1145,8 @@ def task_abbyy_ocr_pages(file_path: str) -> Dict[int, str]:
     if not ABBYY_ENABLED or not WIN32COM_AVAILABLE:
         return {}
     try:
+        import pythoncom
+        pythoncom.CoInitialize()  # ThreadPoolExecutor 워커 스레드에서 COM STA 초기화 필수
         app = _win32com.Dispatch("FineReader.Application.16")
         doc = app.OpenDocument(file_path)
         pages: Dict[int, str] = {}
@@ -1158,6 +1162,12 @@ def task_abbyy_ocr_pages(file_path: str) -> Dict[int, str]:
     except Exception as e:
         logging.error(f"[ABBYY] 실패: {file_path} | {e}")
         return {}
+    finally:
+        try:
+            import pythoncom
+            pythoncom.CoUninitialize()
+        except Exception:
+            pass
 
 
 def task_any_fallback(file_path):
@@ -1239,6 +1249,244 @@ def extract_doc_metadata(file_path: str, content: str, page_idx: int) -> dict:
     return meta
 
 
+# ─── 연필 필기 보정 전처리 ──────────────────────────────────────────────────────
+def _enhance_pencil_page(arr):  # -> np.ndarray
+    """numpy grayscale uint8 배열 → 연필 필기 선명화.
+    Auto-level(1% 클리핑) + gamma 보정으로 연필 마크(회색)→짙게, 배경(흰)→밝게."""
+    import numpy as np
+    arr = arr.astype(np.float32)
+    lo, hi = float(np.percentile(arr, 1)), float(np.percentile(arr, 99))
+    if hi > lo:
+        arr = np.clip((arr - lo) / (hi - lo) * 255.0, 0.0, 255.0)
+    # gamma 1.8: 어두운 픽셀(연필)은 더 어둡게, 밝은 픽셀(배경)은 더 밝게
+    arr = (arr / 255.0) ** 1.8 * 255.0
+    return arr.clip(0, 255).astype(np.uint8)
+
+
+def _page_phash(arr) -> tuple:
+    """8x8 평균 해시 (perceptual hash). 중복 페이지 감지용."""
+    import numpy as np
+    h, w = arr.shape
+    # 8x8로 다운샘플 (단순 stride 슬라이싱)
+    rh, rw = max(1, h // 8), max(1, w // 8)
+    small = arr[::rh, ::rw][:8, :8]
+    if small.shape != (8, 8):
+        small = np.pad(small, ((0, 8 - small.shape[0]), (0, 8 - small.shape[1])), constant_values=128)
+    mean = small.mean()
+    return tuple((small > mean).flatten().tolist())
+
+
+def _hamming(h1: tuple, h2: tuple) -> int:
+    return sum(a != b for a, b in zip(h1, h2))
+
+
+def _make_enhanced_tempfile(file_path: str, ext: str) -> Optional[str]:
+    """이미지/스캔PDF → 연필 필기 보정 + 중복 페이지 제거된 임시 파일 반환.
+    실패 시 None(원본 사용).
+    - 단일 이미지: 보정만
+    - PDF: 페이지별 보정 + 시각적 중복(phash 해밍거리<6) 제거
+    """
+    import numpy as np
+    try:
+        if ext in ('jpg', 'jpeg', 'png', 'bmp', 'webp', 'tiff', 'tif'):
+            with Image.open(file_path) as img:
+                gray = np.array(img.convert("L"))
+                enhanced_arr = _enhance_pencil_page(gray)
+                pil_out = Image.fromarray(enhanced_arr, "L")
+                pil_out = ImageEnhance.Sharpness(pil_out).enhance(1.8)
+                tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+                pil_out.save(tmp.name, "PNG", dpi=(300, 300))
+                tmp.close()
+                return tmp.name
+
+        elif ext == 'pdf' and PYMUPDF_AVAILABLE:
+            src = fitz.open(file_path)
+            dst = fitz.open()
+            seen_hashes: list = []   # 이미 포함된 페이지 해시 목록
+            skipped = 0
+
+            for page in src:
+                mat = fitz.Matrix(2, 2)  # 300 DPI 렌더
+                pix = page.get_pixmap(matrix=mat, colorspace=fitz.csGRAY)
+                arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width).copy()
+
+                # ── 중복 감지: 기존 페이지와 해밍 거리 < 6이면 중복으로 판단 ──
+                ph = _page_phash(arr)
+                is_dup = any(_hamming(ph, prev) < 6 for prev in seen_hashes)
+                if is_dup:
+                    skipped += 1
+                    continue
+                seen_hashes.append(ph)
+
+                # ── 보정 ──
+                enhanced_arr = _enhance_pencil_page(arr)
+                pil_out = Image.fromarray(enhanced_arr, "L")
+                pil_out = ImageEnhance.Sharpness(pil_out).enhance(1.8)
+                new_page = dst.new_page(width=page.rect.width, height=page.rect.height)
+                buf = io.BytesIO()
+                pil_out.save(buf, "PNG")
+                new_page.insert_image(new_page.rect, stream=buf.getvalue())
+
+            src.close()
+            if skipped:
+                logging.info(f"[ENHANCE] 중복 페이지 {skipped}개 제거: {os.path.basename(file_path)}")
+            if dst.page_count == 0:
+                dst.close()
+                return None  # 전부 중복이면 원본 사용
+            tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+            dst.save(tmp.name)
+            dst.close()
+            tmp.close()
+            return tmp.name
+
+    except Exception as _e:
+        logging.warning(f"[ENHANCE] 전처리 실패 → 원본 사용: {file_path} | {_e}")
+    return None
+
+
+def _extract_pdf_chunk(src_path: str, start_page: int, end_page: int) -> Optional[str]:
+    """src_path의 start_page..end_page-1 페이지를 임시 PDF로 추출. 실패 시 None."""
+    if not PYMUPDF_AVAILABLE:
+        return None
+    try:
+        src = fitz.open(src_path)
+        dst = fitz.open()
+        dst.insert_pdf(src, from_page=start_page, to_page=end_page - 1)
+        src.close()
+        tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+        dst.save(tmp.name)
+        dst.close()
+        tmp.close()
+        return tmp.name
+    except Exception as e:
+        logging.warning(f"[SPLIT] PDF 청크 추출 실패: {src_path}[{start_page}:{end_page}] | {e}")
+        return None
+
+
+def _parse_gcp_raw_to_pages(gcp_raw: str, page_offset: int) -> Dict[int, str]:
+    """GCP OCR raw 텍스트(--- Page N --- 구분) → Dict[절대페이지인덱스, 텍스트]."""
+    pages: Dict[int, str] = {}
+    if not gcp_raw or gcp_raw.startswith("[VISUAL_CONTENT_PENDING"):
+        return pages
+    cur_page, cur_lines = 0, []
+    for line in gcp_raw.splitlines():
+        m = re.match(r"---\s*[Pp]age\s+(\d+)\s*---", line)
+        if m:
+            if cur_lines:
+                pages[page_offset + cur_page] = "\n".join(cur_lines).strip()
+            cur_page = int(m.group(1)) - 1
+            cur_lines = []
+        else:
+            cur_lines.append(line)
+    if cur_lines:
+        pages[page_offset + cur_page] = "\n".join(cur_lines).strip()
+    return pages
+
+
+def _dispatch_cv_chunked(
+    file_path: str, ext: str, abs_path: str,
+    cpu_pool, gcp_pool, total_raw_pages: int,
+) -> List[PageNode]:
+    """대용량 PDF를 PDF_CHUNK_PAGES 단위로 분할 → 청크별 병렬 OCR → PageNode 합산.
+    각 청크를 모두 미리 제출한 뒤 순서대로 결과를 수집하므로 최대한 병렬로 처리된다."""
+    logging.info(
+        f"[SPLIT] {os.path.basename(file_path)} {total_raw_pages}p → "
+        f"{(total_raw_pages + PDF_CHUNK_PAGES - 1) // PDF_CHUNK_PAGES}개 청크 분할"
+    )
+
+    # 1) 청크 추출 + 퓨처 일괄 제출
+    chunk_jobs = []  # (chunk_start, chunk_path, enhanced_path, abbyy_fut, gcp_fut)
+    for chunk_start in range(0, total_raw_pages, PDF_CHUNK_PAGES):
+        chunk_end  = min(chunk_start + PDF_CHUNK_PAGES, total_raw_pages)
+        chunk_path = _extract_pdf_chunk(file_path, chunk_start, chunk_end)
+        if chunk_path is None:
+            continue
+        enhanced_path = _make_enhanced_tempfile(chunk_path, "pdf")
+        proc_path     = enhanced_path if enhanced_path else chunk_path
+
+        abbyy_fut = cpu_pool.submit(task_abbyy_ocr_pages, proc_path) if cpu_pool else None
+        gcp_fut   = None
+        if USE_GCP_SSH_OCR and not _CLOUD_DOWN.is_set() and gcp_pool:
+            # 청크 파일은 실제 로컬 파일이므로 Drive 경로 불필요
+            gcp_fut = gcp_pool.submit(task_vision_via_gcp_ssh, proc_path, "pdf")
+
+        chunk_jobs.append((chunk_start, chunk_path, enhanced_path, abbyy_fut, gcp_fut))
+        logging.debug(
+            f"[SPLIT]  └ 청크 제출 [{chunk_start}:{chunk_end}]: {os.path.basename(proc_path)}"
+        )
+
+    # 2) 결과 수집 (chunk_jobs 순서 = 제출 순서이므로 앞 청크가 먼저 완료됨)
+    abbyy_pages: Dict[int, str] = {}
+    gcp_pages:   Dict[int, str] = {}
+    tmp_files: List[str] = []
+
+    for (chunk_start, chunk_path, enhanced_path, abbyy_fut, gcp_fut) in chunk_jobs:
+        tmp_files.append(chunk_path)
+        if enhanced_path:
+            tmp_files.append(enhanced_path)
+
+        if abbyy_fut is not None:
+            try:
+                for k, v in abbyy_fut.result(timeout=300).items():
+                    abbyy_pages[chunk_start + k] = v
+            except Exception as e:
+                logging.error(f"[ABBYY-CHUNK] {file_path}[{chunk_start}] | {e}")
+
+        if gcp_fut is not None:
+            try:
+                gcp_raw = gcp_fut.result(timeout=600)
+                gcp_pages.update(_parse_gcp_raw_to_pages(gcp_raw, chunk_start))
+            except Exception as e:
+                logging.error(f"[GCP-CHUNK] {file_path}[{chunk_start}] | {e}")
+
+    # 3) 임시 파일 정리
+    for tp in tmp_files:
+        try:
+            os.unlink(tp)
+        except Exception:
+            pass
+
+    total_pages   = max(
+        max(abbyy_pages.keys(), default=-1) + 1,
+        max(gcp_pages.keys(),   default=-1) + 1,
+        total_raw_pages,
+    )
+    combined_text = "\n".join(list(abbyy_pages.values()) + list(gcp_pages.values()))
+    meta          = extract_doc_metadata(file_path, combined_text, 0)
+
+    nodes: List[PageNode] = []
+    for p_idx in range(total_pages):
+        text_str   = abbyy_pages.get(p_idx, "")
+        visual_str = gcp_pages.get(p_idx, "")
+        tid = f"{abs_path}::page_{p_idx}::text"
+        vid = f"{abs_path}::page_{p_idx}::visual"
+        if text_str:
+            nodes.append(PageNode(
+                page_idx=p_idx, total_pages=total_pages,
+                element_type="text", text=text_str,
+                parent_doc_id=abs_path,
+                sibling_page_id=vid if visual_str else None,
+                **meta,
+            ))
+        if visual_str:
+            nodes.append(PageNode(
+                page_idx=p_idx, total_pages=total_pages,
+                element_type="visual", text=visual_str,
+                parent_doc_id=abs_path,
+                sibling_page_id=tid if text_str else None,
+                **meta,
+            ))
+        if not text_str and not visual_str:
+            nodes.append(PageNode(
+                page_idx=p_idx, total_pages=total_pages,
+                element_type="mixed",
+                text=_ocr_unavailable_stub(file_path, f"page {p_idx+1} OCR 결과 없음"),
+                parent_doc_id=abs_path,
+                **meta,
+            ))
+    return nodes
+
+
 # ─── CV 병렬 조합 (ABBYY CPU + GCP SSH GPU 동시) ─────────────────────────────
 def dispatch_cv_combined(file_path: str, ext: str,
                           is_stub: bool = False,
@@ -1249,16 +1497,33 @@ def dispatch_cv_combined(file_path: str, ext: str,
     cpu_pool = _cpu_pool_ref[0]
     gcp_pool = _gcp_pool_ref[0]
 
-    # ABBYY 작업 제출 (CPU)
-    abbyy_fut = cpu_pool.submit(task_abbyy_ocr_pages, file_path) if cpu_pool else None
+    # PDF 페이지 수 확인 — PDF_CHUNK_PAGES 초과 시 청크 분할 처리
+    if ext == "pdf" and PYMUPDF_AVAILABLE:
+        try:
+            _probe     = fitz.open(file_path)
+            _pdf_pages = _probe.page_count
+            _probe.close()
+        except Exception:
+            _pdf_pages = 0
+        if _pdf_pages > PDF_CHUNK_PAGES:
+            return _dispatch_cv_chunked(file_path, ext, abs_path, cpu_pool, gcp_pool, _pdf_pages)
 
-    # GCP SSH 작업 제출 (GPU)
+    # 연필 필기 보정 전처리 (스캔 이미지/PDF)
+    _enhanced_tmp = _make_enhanced_tempfile(file_path, ext)
+    _proc_path = _enhanced_tmp if _enhanced_tmp else file_path
+    if _enhanced_tmp:
+        logging.info(f"[ENHANCE] 필기 보정 적용: {os.path.basename(file_path)}")
+
+    # ABBYY 작업 제출 (CPU) — 보정 파일 사용
+    abbyy_fut = cpu_pool.submit(task_abbyy_ocr_pages, _proc_path) if cpu_pool else None
+
+    # GCP SSH 작업 제출 (GPU) — 보정 파일 사용
     gcp_fut = None
     if USE_GCP_SSH_OCR and not _CLOUD_DOWN.is_set() and gcp_pool:
         if is_stub and GDRIVE_API_AVAILABLE and _get_drive_creds() is not None:
-            gcp_fut = gcp_pool.submit(task_vision_via_gcp_ssh_drive, file_path, ext, None)
+            gcp_fut = gcp_pool.submit(task_vision_via_gcp_ssh_drive, _proc_path, ext, None)
         else:
-            gcp_fut = gcp_pool.submit(task_vision_via_gcp_ssh, file_path, ext)
+            gcp_fut = gcp_pool.submit(task_vision_via_gcp_ssh, _proc_path, ext)
 
     # ABBYY 결과 수집
     abbyy_pages: Dict[int, str] = {}
@@ -1277,20 +1542,7 @@ def dispatch_cv_combined(file_path: str, ext: str,
             logging.error(f"[GCP-FUT] {file_path} | {e}")
 
     # GCP raw → Dict[int, str]
-    gcp_pages: Dict[int, str] = {}
-    if gcp_raw and not gcp_raw.startswith("[VISUAL_CONTENT_PENDING"):
-        cur_page, cur_lines = 0, []
-        for line in gcp_raw.splitlines():
-            m = re.match(r"---\s*[Pp]age\s+(\d+)\s*---", line)
-            if m:
-                if cur_lines:
-                    gcp_pages[cur_page] = "\n".join(cur_lines).strip()
-                cur_page = int(m.group(1)) - 1
-                cur_lines = []
-            else:
-                cur_lines.append(line)
-        if cur_lines:
-            gcp_pages[cur_page] = "\n".join(cur_lines).strip()
+    gcp_pages: Dict[int, str] = _parse_gcp_raw_to_pages(gcp_raw, 0)
 
     total_pages = max(
         max(abbyy_pages.keys(), default=-1) + 1,
@@ -1299,6 +1551,13 @@ def dispatch_cv_combined(file_path: str, ext: str,
     )
     combined_text = "\n".join(list(abbyy_pages.values()) + list(gcp_pages.values()))
     meta = extract_doc_metadata(file_path, combined_text, 0)
+
+    # 임시 파일 정리
+    if _enhanced_tmp:
+        try:
+            os.unlink(_enhanced_tmp)
+        except Exception:
+            pass
 
     nodes: List[PageNode] = []
     for p_idx in range(total_pages):
