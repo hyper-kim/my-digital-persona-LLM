@@ -47,6 +47,8 @@ qdrant_server/
 # ── 처리 상태 DB / 개인정보 ────────────────────────────────────────
 # 로컬 파일 경로 등 개인정보 포함
 processed_files.db
+processed_files.db-shm
+processed_files.db-wal
 email_log.db
 kakao_log.db
 

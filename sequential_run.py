@@ -64,8 +64,47 @@ FOLDERS = [
     r"G:\내 드라이브\해외 대학 편입 정리",
     resolve_takeout_path(),
 ]
-VM_MONITOR = os.path.join(PROJECT_DIR, "_vm_monitor.py")
-_vm_mon_proc = None
+VM_MONITOR    = os.path.join(PROJECT_DIR, "_vm_monitor.py")
+QDRANT_EXE    = os.path.join(PROJECT_DIR, "qdrant_server", "qdrant.exe")
+QDRANT_DATA   = os.getenv("QDRANT_SERVER_DATA", os.path.join(PROJECT_DIR, "qdrant_server_data"))
+_vm_mon_proc  = None
+_qdrant_proc  = None
+
+
+def ensure_qdrant_server():
+    """localhost:6333이 응답 없으면 qdrant.exe 자동 시작"""
+    global _qdrant_proc
+    import urllib.request
+    try:
+        urllib.request.urlopen("http://localhost:6333/healthz", timeout=3)
+        print("  [QDRANT] 서버 이미 실행 중")
+        return
+    except Exception:
+        pass
+
+    if not os.path.exists(QDRANT_EXE):
+        print(f"  [QDRANT] qdrant.exe 없음: {QDRANT_EXE} — 서버 시작 불가")
+        return
+
+    env = os.environ.copy()
+    env["QDRANT__STORAGE__STORAGE_PATH"] = QDRANT_DATA
+    _qdrant_proc = subprocess.Popen(
+        [QDRANT_EXE],
+        cwd=os.path.dirname(QDRANT_EXE),
+        env=env,
+        stdout=open(os.path.join(PROJECT_DIR, "qdrant_server", "qdrant.log"), "a", encoding="utf-8"),
+        stderr=open(os.path.join(PROJECT_DIR, "qdrant_server", "qdrant_err.log"), "a", encoding="utf-8"),
+    )
+    print(f"  [QDRANT] 서버 시작 (PID {_qdrant_proc.pid}), 준비 대기...")
+    for _ in range(15):
+        time.sleep(1)
+        try:
+            urllib.request.urlopen("http://localhost:6333/healthz", timeout=2)
+            print("  [QDRANT] 준비 완료")
+            return
+        except Exception:
+            pass
+    print("  [QDRANT] ⚠️  시작 타임아웃 — 계속 진행")
 
 
 def start_vm_monitor():
@@ -124,6 +163,7 @@ def run_folder(folder):
 
 
 if __name__ == "__main__":
+    ensure_qdrant_server()
     start_vm_monitor()
 
     try:

@@ -121,14 +121,6 @@ def last_log_age_min(out_lines):
                 pass
     return 999
 
-# ── 경보 소리 (Windows beep) ─────────────────────────────────────────────
-def beep():
-    try:
-        import winsound
-        winsound.Beep(880, 400)
-    except Exception:
-        pass
-
 # ── 메인 루프 ────────────────────────────────────────────────────────────
 def print_status(prev_processed):
     now        = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -158,7 +150,6 @@ def print_status(prev_processed):
     # 파이프라인 활성 여부
     if log_age > 10:
         alive_str = f"{ANSI_RED}⚠  마지막 활동 {log_age:.0f}분 전 — 멈춤 의심{ANSI_RST}"
-        beep()
     else:
         alive_str = f"{ANSI_GRN}● 활성 ({log_age:.0f}분 전){ANSI_RST}"
 
