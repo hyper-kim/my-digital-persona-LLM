@@ -90,7 +90,7 @@ MAX_AUDIO_WORKERS  = int(os.getenv("MAX_AUDIO_WORKERS",  "1"))
 QUEUE_SIZE = int(os.getenv("QUEUE_SIZE", "200"))
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "1200"))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "200"))
-PDF_CHUNK_PAGES = int(os.getenv("PDF_CHUNK_PAGES", "30"))  # 이 페이지 수 초과 PDF는 30p 단위 청크로 분할 처리
+PDF_CHUNK_PAGES = int(os.getenv("PDF_CHUNK_PAGES", "5"))   # PDF 청크 크기 (기본 5p). 2페이지 이상이면 무조건 청크 분할
 AUTO_BACKUP_INTERVAL_SEC = int(os.getenv("AUTO_BACKUP_INTERVAL_SEC", "900"))
 BACKUP_ROOT = os.getenv("BACKUP_ROOT", os.path.join(PROJECT_DIR, "backups"))
 
@@ -1637,7 +1637,7 @@ def dispatch_cv_combined(file_path: str, ext: str,
             _probe.close()
         except Exception:
             _pdf_pages = 0
-        if _pdf_pages > PDF_CHUNK_PAGES:
+        if _pdf_pages > 1:  # 2페이지 이상이면 항상 청크 분할 (최대 병렬)
             return _dispatch_cv_chunked(file_path, ext, abs_path, cpu_pool, gcp_pool, _pdf_pages)
 
     # 연필 필기 보정 전처리 (스캔 이미지/PDF)
