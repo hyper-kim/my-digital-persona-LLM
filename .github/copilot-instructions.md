@@ -147,20 +147,29 @@ PDF_CHUNK_PAGES=5                   # 기본값 30 → 5로 축소 (최대 병�
 > 파일만 봐서는 알 수 없는 내용이므로 새 세션 시작 시 반드시 확인하세요.
 
 ### VM 상태 (2026-03-29 기준)
-- `mydigitalpersonaembedder` RUNNING, IP `34.75.63.124` (재시작 후 IP 변경됨)
+- `mydigitalpersonaembedder` RUNNING, **현재 IP `34.24.238.116`** (`.env` 업데이트 완료)
 - **GPU 드라이버 정상**: nvidia-smi NVIDIA L4, CUDA 13.2 확인됨
-  - 원인: vm_setup.sh에서 GCC 11로 nvidia-dkms DKMS 빌드 실패 → GCC 12 수동 설치로 해결
-  - vm_setup.sh 수정 완료 (GCC 12 자동 설치, export HOME=/root, modprobe 추가)
-- **qwen3-vl:8b 모델 pull 진행 중** (~10분, PID 2923)
-  - 원인: 스타트업 스크립트 root 실행 시 $HOME 미정의 panic → `export HOME=/root` 추가로 해결
-- pull 완료 후 `sequential_run.py`로 파이프라인 재시작 가능
-- ⚠️ VM 재시작마다 External IP가 바뀜 → `_vm_manager.get_external_ip()` + `update_env_ip()` 항상 실행 필요
+- **qwen3-vl:8b 모델** pull 완료 확인 (`ollama list` 6.1GB 표시됨)
+- GCP Ops Agent 설치 완료 (기본 hostmetrics 수집 중)
+- ⚠️ VM 재시작마다 External IP가 바뀜 → `_autopilot.py`가 5분마다 자동 감지/업데이트
 
-### 파이프라인 진행도 (마지막 확인 기준)
-- `processed_files.db` 처리완료: **약 11,224건**, 실패: **약 287건**
-- 한성과고 PDF 실패 13개 → `_retry_empty_onenote.py --all`로 재처리 등록 완료 (다시 실행 불필요)
-- Qdrant `qdrant_db/` 크기: **24.8GB** (SQLite), 벡터 수 미확인 (Qdrant 꺼진 상태)
-- 파이프라인 재시작 시 `sequential_run.py` 사용
+### 오토파일럿 시스템 (2026-03-29 추가, commit 4bf509d)
+- **`_autopilot.py`** — 완전 자율 복구 데몬 (이제 사람이 볼 필요 없음)
+  - 30초: 프로세스 생존 확인 (sequential_run, vm_monitor 죽으면 자동 재시작)
+  - 5분: VM IP 변경 감지 → `.env` + ingest 프로세스 자동 재시작
+  - 5분: WinError 10061/timed out 실패파일 → VM RUNNING 상태면 DB에서 삭제(재처리)
+  - 10분: 처리건수 스탈 20분 → 파이프라인 재시작
+  - 15분: GCP Ops Agent 사망 시 자동 재시작/재설치
+  - 30분: VM 디스크/메모리 헬스체크 후 로깅
+- **`sequential_run.py`** — 시작 시 autopilot 자동 백그라운드 실행 (`start_autopilot()`)
+- 로그: `autopilot.log`
+
+### 파이프라인 진행도 (2026-03-29 17:27 기준)
+- `processed_files.db` 처리완료: **11,442건**, 실패: **253건** (대부분 연결오류 → autopilot이 자동 정리)
+- 한성과고 10,140건 완전 완료 (미처리 0건)
+- 현재 단계: `해외 대학 편입 정리` 전체 폴더 처리 중 → 완료 후 `Takeout` (376GB zip) 자동 진행
+- Takeout 폴더: `G:\내 드라이브\Takeout` (13개 zip, ~376GB) — sequential_run.py 3단계에 이미 포함
+- ⚠️ Takeout은 zip 파일 → `1_ingest_data.py`가 zip 직접 처리 가능 여부 확인 필요
 
 ### 직접 테스트로 확인된 사실 (코드엔 없음)
 - `gemma3:12b` 한국어 직접 테스트 결과: **영어로만 응답** (한국어 구사 불가 수준)
@@ -169,12 +178,13 @@ PDF_CHUNK_PAGES=5                   # 기본값 30 → 5로 축소 (최대 병�
 - Cornell IRP / UPenn catalog 크롤: 200 OK지만 **JS 렌더링 필요 페이지** → httpx로는 빈 HTML
   - 실질적 편입 데이터 없음 → 대체 URL 또는 Playwright 도입 검토 필요
 
-### 다음 할 일 (우선순위 순)
-1. qwen3-vl:8b pull 완료 확인: `ssh kjy@34.75.63.124 "ollama list"`
-2. 파이프라인 재시작: `python sequential_run.py`
-3. `.env` `SEARCH_MODEL=gemma3:12b` → `qwen3:14b` 변경
-4. Cornell IRP / UPenn 크롤 대체 URL 탐색 (JS 렌더링 우회)
-5. `_monitor.py` 띄워서 진행 상황 감시: `python _monitor.py`
+### 새 세션 시작 시 확인 항목
+1. **파이프라인 실행 중인지**: `Get-Process python*` → sequential_run.py + autopilot.py 있어야 함
+   - 없으면: `venv\Scripts\python.exe -u -X utf8 sequential_run.py` (백그라운드)
+2. **VM IP 확인/업데이트**: `python -c "import _vm_manager as m; ip=m.get_external_ip(); m.update_env_ip(ip); print(ip)"`
+3. **DB 진행도**: `python -c "import sqlite3; c=sqlite3.connect('processed_files.db'); print(c.execute('SELECT COUNT(*) FROM processed').fetchone()[0])"`
+4. `autopilot.log` 확인: 최근 복구 동작 이력 확인
+5. **남은 작업**: `.env` `SEARCH_MODEL=qwen3:14b` 변경 (미수정)
 
 ## 코딩 규칙
 - 파이썬 파일은 반드시 `# -X utf8` 인코딩으로 실행
