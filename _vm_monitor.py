@@ -17,6 +17,7 @@ load_dotenv()
 
 # ── 설정 ──────────────────────────────────────────────────────────────
 IDLE_TIMEOUT   = int(os.getenv("VM_IDLE_TIMEOUT_MIN", "10")) * 60   # 유휴 시 VM 종료 (초)
+VM_AUTO_STOP   = os.getenv("VM_AUTO_STOP", "false").lower() in ("1", "true", "yes", "on")
 START_COOLDOWN = 180   # VM 시작 후 최소 유지 시간 (초) - 너무 짧으면 재시작 반복
 CHECK_INTERVAL = 30    # 로그 확인 주기 (초)
 VM_STATUS_INTERVAL = 300  # VM 실제 상태 API 확인 주기 (초) - API 비용 절약
@@ -107,7 +108,7 @@ def monitor_loop():
     _start_backoff_until = 0.0  # Spot 리소스 부족 시 재시도 유예 시각
 
     logging.info(f"VM 모니터 시작 | VM={VM_NAME or '미설정'} ZONE={VM_ZONE or '미설정'} "
-                 f"IDLE_TIMEOUT={IDLE_TIMEOUT//60}분")
+                 f"IDLE_TIMEOUT={IDLE_TIMEOUT//60}분 AUTO_STOP={VM_AUTO_STOP}")
 
     if not VM_NAME or not VM_ZONE:
         logging.warning("⚠️  GCP_VM_NAME / GCP_VM_ZONE 미설정 → VM 자동 관리 비활성")
@@ -138,7 +139,7 @@ def monitor_loop():
         if not VM_NAME or not VM_ZONE:
             continue
 
-        # ── VM RUNNING인데 SSH 연속실패 → IP 변경 감지 ──
+        # ── VM RUNNING인데 SSH 연속실패 → IP 변경 감지 (재시작 금지) ──
         if consec_fail >= 5 and vm_state == "RUNNING":
             logging.info(f"VM RUNNING 상태인데 SSH 연속실패 {consec_fail}회 → IP 변경 여부 확인")
             try:
@@ -148,18 +149,10 @@ def monitor_loop():
                 if actual_ip and actual_ip != env_ip:
                     logging.info(f"IP 변경 감지: {env_ip} → {actual_ip}, .env 업데이트")
                     _call_manager_ip(actual_ip)
-                    consec_fail = 0
-                    last_vm_api = 0
                 else:
-                    logging.info(f"IP 동일({actual_ip}), VM 자체 문제 → 재시작 시도")
-                    r = _call_manager("stop_vm")
-                    time.sleep(10)
-                    r = _call_manager("start_vm")
-                    logging.info(f"VM restart = {r}")
-                    vm_state = "STAGING"
-                    vm_started_t = now
-                    consec_fail = 0
-                    last_vm_api = 0
+                    logging.info(f"IP 동일({actual_ip}), VM 재시작은 수행하지 않음 (과잉복구 방지)")
+                consec_fail = 0
+                last_vm_api = 0
             except Exception as e:
                 logging.error(f"IP 확인 실패: {e}")
                 consec_fail = 0
@@ -214,7 +207,8 @@ def monitor_loop():
         # last_gcp_t=0 이면 VM 시작 후 IDLE_TIMEOUT 동안 GCP 한 번도 안 쓴 것 → 동일 처리
         effective_last_gcp = last_gcp_t if last_gcp_t > 0 else vm_started_t
         effective_idle = (now - effective_last_gcp) if effective_last_gcp > 0 else 0
-        if (effective_last_gcp > 0
+        if (VM_AUTO_STOP
+            and effective_last_gcp > 0
                 and effective_idle > IDLE_TIMEOUT
                 and vm_state == "RUNNING"
                 and min_hold_ok):
