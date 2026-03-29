@@ -122,6 +122,147 @@ def wait_for_status(target: str, timeout: int = 180) -> bool:
         time.sleep(10)
     return False
 
+def create_vm(provisioning_model: str = "STANDARD", disk_gb: int = 100) -> dict:
+    """VM 인스턴스를 새로 생성한다. 디스크 없음 → Ubuntu 22.04 + 스타트업 스크립트.
+    반환: {"status": "ok"/"fail:...", "ip": "외부IP 또는 ''"} """
+    if not VM_NAME or not VM_ZONE:
+        return {"status": "UNCONFIGURED", "ip": ""}
+
+    # 이미 있으면 스킵
+    s = get_status()
+    if s not in ("ERROR:404", "UNCONFIGURED", "UNKNOWN"):
+        return {"status": f"already_exists:{s}", "ip": get_external_ip()}
+
+    # SSH 공개키 로드
+    _here = os.path.dirname(os.path.abspath(__file__))
+    ssh_key_path = os.getenv("SSH_KEY_PATH",
+                             r"C:\Users\kjy\.ssh\gcp_key_fixed")
+    pub_key_path = ssh_key_path + ".pub"
+    try:
+        with open(pub_key_path, "r") as f:
+            pub_key = f.read().strip()
+    except Exception:
+        return {"status": "fail:pub_key_not_found", "ip": ""}
+    ssh_user = os.getenv("CLOUD_VM_USER", "kjy")
+    ssh_meta = f"{ssh_user}:{pub_key}"  # GCP metadata 형식
+
+    # 스타트업 스크립트 (vm_setup.sh)
+    setup_sh = os.path.join(_here, "vm_setup.sh")
+    try:
+        with open(setup_sh, "r", encoding="utf-8") as f:
+            startup_script = f.read()
+    except Exception:
+        startup_script = "#!/bin/bash\necho 'vm_setup.sh not found'"
+
+    machine_url = (
+        f"https://www.googleapis.com/compute/v1/projects/{PROJECT}"
+        f"/zones/{VM_ZONE}/machineTypes/g2-standard-32"
+    )
+    image_url = (
+        "https://www.googleapis.com/compute/v1/projects/ubuntu-os-cloud"
+        "/global/images/family/ubuntu-2204-lts"
+    )
+    body = {
+        "name": VM_NAME,
+        "machineType": machine_url,
+        "scheduling": {
+            "onHostMaintenance": "TERMINATE",
+            "automaticRestart": False,
+            "provisioningModel": provisioning_model,   # "STANDARD" or "SPOT"
+            **({"instanceTerminationAction": "DELETE"} if provisioning_model == "SPOT" else {}),
+        },
+        "disks": [{
+            "boot": True,
+            "autoDelete": True,
+            "initializeParams": {
+                "sourceImage": image_url,
+                "diskSizeGb": str(disk_gb),
+                "diskType": (
+                    f"https://www.googleapis.com/compute/v1/projects/{PROJECT}"
+                    f"/zones/{VM_ZONE}/diskTypes/pd-balanced"
+                ),
+            },
+        }],
+        "networkInterfaces": [{
+            "network": f"https://www.googleapis.com/compute/v1/projects/{PROJECT}/global/networks/default",
+            "accessConfigs": [{"type": "ONE_TO_ONE_NAT", "name": "External NAT"}],
+        }],
+        "tags": {"items": ["http-server", "https-server"]},
+        "metadata": {
+            "items": [
+                {"key": "ssh-keys",        "value": ssh_meta},
+                {"key": "startup-script",  "value": startup_script},
+            ]
+        },
+        "serviceAccounts": [],   # SA 없음 (mydigital-persona-embedder에 serviceAccountUser 권한 없음)
+    }
+
+    try:
+        url = (f"https://compute.googleapis.com/compute/v1"
+               f"/projects/{PROJECT}/zones/{VM_ZONE}/instances")
+        r = _req.post(url, headers=_hdr(), json=body, timeout=30)
+        if r.status_code not in (200, 201):
+            return {"status": f"fail:{r.status_code} {r.text[:300]}", "ip": ""}
+        op_url = r.json().get("selfLink", "")
+        result = _wait_operation(op_url, timeout=180) if op_url else "ok"
+        if result not in ("done", "ok"):
+            return {"status": result, "ip": ""}
+        # IP 확인 (VM 기동 후 할당)
+        for _ in range(12):
+            time.sleep(10)
+            ip = get_external_ip()
+            if ip:
+                return {"status": "ok", "ip": ip}
+        return {"status": "ok_no_ip", "ip": ""}
+    except Exception as e:
+        return {"status": f"fail:{e}", "ip": ""}
+
+
+def get_external_ip() -> str:
+    """현재 VM의 외부 IP 반환. 없으면 ''"""
+    if not VM_NAME or not VM_ZONE:
+        return ""
+    try:
+        r = _req.get(_base(), headers=_hdr(), timeout=10)
+        if r.status_code != 200:
+            return ""
+        ifaces = r.json().get("networkInterfaces", [])
+        for iface in ifaces:
+            for ac in iface.get("accessConfigs", []):
+                ip = ac.get("natIP", "")
+                if ip:
+                    return ip
+    except Exception:
+        pass
+    return ""
+
+
+def update_env_ip(new_ip: str, env_path: str = None) -> bool:
+    """`.env`의 CLOUD_VM_IP 와 CLOUD_OLLAMA_URL을 새 IP로 업데이트."""
+    if not new_ip:
+        return False
+    _here = os.path.dirname(os.path.abspath(__file__))
+    env_path = env_path or os.path.join(_here, ".env")
+    try:
+        with open(env_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        import re
+        # CLOUD_VM_IP=...
+        content = re.sub(r"(?m)^CLOUD_VM_IP=.*$", f"CLOUD_VM_IP={new_ip}", content)
+        # CLOUD_OLLAMA_URL=http://기존IP:11434
+        content = re.sub(
+            r"(?m)^CLOUD_OLLAMA_URL=http://[\d.]+:(\d+)",
+            f"CLOUD_OLLAMA_URL=http://{new_ip}:\\1",
+            content,
+        )
+        with open(env_path, "w", encoding="utf-8") as f:
+            f.write(content)
+        return True
+    except Exception as e:
+        logging.error(f"[ENV] IP 업데이트 실패: {e}")
+        return False
+
+
 def upgrade_to_standard() -> str:
     """Spot → Standard 업그레이드 (VM 중지 후 실행)"""
     if not VM_NAME or not VM_ZONE:

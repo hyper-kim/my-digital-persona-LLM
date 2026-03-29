@@ -76,6 +76,19 @@ def folder_has_images(folder: str) -> bool:
     return False
 
 
+def _call_manager_ip(new_ip: str) -> None:
+    """_vm_manager.update_env_ip 호출 후 글로벌 CLOUD_VM_IP 재로드."""
+    try:
+        import _vm_manager as m
+        m.update_env_ip(new_ip)
+        # 1_ingest_data 등이 import될 때 읽은 값은 변경 불가이므로
+        # 실제 SSH 연결이 새 IP를 쓰도록 load_dotenv re-override
+        from dotenv import load_dotenv
+        load_dotenv(override=True)
+    except Exception as e:
+        logging.error(f"[ENV] IP 업데이트 실패: {e}")
+
+
 def _call_manager(fn_name: str) -> str:
     try:
         import _vm_manager as m
@@ -132,6 +145,28 @@ def monitor_loop():
                 remaining = int(_start_backoff_until - now)
                 logging.info(f"리소스 부족 백오프 중 ({remaining}s 남음) → VM 시작 보류")
                 consec_fail = 0
+            elif "404" in vm_state or "not_found" in vm_state.lower():
+                # ── 인스턴스 자체가 없음 → 새로 생성 ──
+                logging.info(f"GCP SSH 연속실패 {consec_fail}회, VM 404 → 새 인스턴스 생성 (Standard)")
+                result = _call_manager("create_vm")          # dict {"status":..., "ip":...}
+                logging.info(f"VM create = {result}")
+                if isinstance(result, dict):
+                    status = result.get("status", "")
+                    new_ip = result.get("ip", "")
+                    if status.startswith("ok") or "already_exists" in status:
+                        vm_state     = "STAGING"
+                        vm_started_t = now
+                        if new_ip:
+                            _call_manager_ip(new_ip)         # .env IP 업데이트
+                            logging.info(f"VM IP 업데이트: {new_ip}")
+                    elif "RESOURCE_POOL_EXHAUSTED" in status.upper():
+                        logging.warning("⚠️  Standard VM 리소스 부족 → 10분 후 재시도")
+                        _start_backoff_until = now + 600
+                    else:
+                        logging.error(f"VM 생성 실패: {status}")
+                        _start_backoff_until = now + 300    # 5분 후 재시도
+                consec_fail = 0
+                last_vm_api = 0
             else:
                 logging.info(f"GCP SSH 연속실패 {consec_fail}회 → VM 시작 시도")
                 r = _call_manager("start_vm")
@@ -141,7 +176,6 @@ def monitor_loop():
                     vm_started_t = now
                     _start_backoff_until = 0
                 elif r and "RESOURCE_POOL_EXHAUSTED" in r.upper():
-                    # Spot 리소스 없음 → 10분 후 재시도
                     logging.warning("⚠️  Spot VM 리소스 부족 (ZONE_RESOURCE_POOL_EXHAUSTED) "
                                     "→ 10분 후 재시도")
                     _start_backoff_until = now + 600
