@@ -105,6 +105,17 @@ GDRIVE_MOUNT      = os.getenv("GDRIVE_MOUNT", r"G:\\")
 _cpu_pool_ref:   List = [None]
 _gcp_pool_ref:   List = [None]
 
+# 특정 파일 앞 N페이지 강제 스킵 설정 (키: 파일명 부분문자열, 값: skip_first 페이지 수)
+# _skip_pages.json 에 {"파일명": N} 형식으로 관리
+_SKIP_PAGES_CFG: Dict[str, int] = {}
+_SKIP_PAGES_JSON = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_skip_pages.json")
+try:
+    if os.path.exists(_SKIP_PAGES_JSON):
+        with open(_SKIP_PAGES_JSON, "r", encoding="utf-8") as _f:
+            _SKIP_PAGES_CFG = json.load(_f)
+except Exception as _e:
+    logging.warning(f"[SKIP_PAGES] 설정 로드 실패: {_e}")
+
 # ☁️ 클라우드 GPU 설정 (GCP L4 Spot VM)
 CLOUD_OLLAMA_URL = os.getenv("CLOUD_OLLAMA_URL", "http://35.211.58.231:11434")
 LOCAL_OLLAMA_URL = os.getenv("LOCAL_OLLAMA_URL", "http://localhost:11434")
@@ -1250,16 +1261,17 @@ def extract_doc_metadata(file_path: str, content: str, page_idx: int) -> dict:
 
 
 # ─── 연필 필기 보정 전처리 ──────────────────────────────────────────────────────
-def _enhance_pencil_page(arr):  # -> np.ndarray
-    """numpy grayscale uint8 배열 → 연필 필기 선명화.
-    Auto-level(1% 클리핑) + gamma 보정으로 연필 마크(회색)→짙게, 배경(흰)→밝게."""
+def _enhance_pencil_page(arr, handwriting: bool = False):  # -> np.ndarray
+    """numpy grayscale uint8 배열 → 필기 선명화.
+    Auto-level(1% 클리핑) + gamma 보정.
+    handwriting=True 시 gamma 2.2 (연필 흐린 선 → 더 강하게 대비 강화)."""
     import numpy as np
     arr = arr.astype(np.float32)
     lo, hi = float(np.percentile(arr, 1)), float(np.percentile(arr, 99))
     if hi > lo:
         arr = np.clip((arr - lo) / (hi - lo) * 255.0, 0.0, 255.0)
-    # gamma 1.8: 어두운 픽셀(연필)은 더 어둡게, 밝은 픽셀(배경)은 더 밝게
-    arr = (arr / 255.0) ** 1.8 * 255.0
+    gamma = 2.2 if handwriting else 1.8
+    arr = (arr / 255.0) ** gamma * 255.0
     return arr.clip(0, 255).astype(np.uint8)
 
 
@@ -1278,6 +1290,57 @@ def _page_phash(arr) -> tuple:
 
 def _hamming(h1: tuple, h2: tuple) -> int:
     return sum(a != b for a, b in zip(h1, h2))
+
+
+def _deskew_arr(arr):
+    """미세 기울기 보정 (-10° ~ +10°, 0.5° 단위). Horizontal projection variance 최대화.
+    이미 _auto_rotate_arr로 90° 보정된 뒤 호출 → 스캔 시 미세 틸트만 잡는다.
+    배경(흰색 255)으로 채워서 빈 영역을 만들지 않음. 품질 무손실(BILINEAR)."""
+    import numpy as np
+    best_var, best_angle = -1.0, 0.0
+    for step in range(-20, 21):  # -10.0°~+10.0° in 0.5° steps (총 41단계)
+        angle  = step * 0.5
+        rotated = np.array(
+            Image.fromarray(arr).rotate(angle, resample=Image.BILINEAR, fillcolor=255)
+        )
+        binary   = (rotated < 128).astype(np.float32)
+        row_sums = binary.sum(axis=1)
+        variance = float(np.var(row_sums))
+        if variance > best_var:
+            best_var, best_angle = variance, angle
+    if abs(best_angle) < 0.5:
+        return arr  # 보정 불필요 (0.5° 미만은 무시)
+    corrected = np.array(
+        Image.fromarray(arr).rotate(best_angle, resample=Image.BILINEAR, fillcolor=255)
+    )
+    logging.debug(f"[DESKEW] {best_angle:+.1f}° 보정")
+    return corrected
+
+
+def _whiten_background(arr):
+    """배경 백색화. 스캔 그림자·황변 배경 → 순백으로.
+    배경 추정: 상위 10% 밝은 픽셀의 중앙값. 180 미만이면 반전 이미지로 판단 → 스킵.
+    품질: float32 연산 후 uint8 반환. 글씨 픽셀 밝기 비율은 그대로 유지."""
+    import numpy as np
+    arr = arr.astype(np.float32)
+    bg = float(np.percentile(arr, 90))
+    if bg < 180:      # 배경이 어두우면 반전 스캔 → 건드리지 않음
+        return arr.clip(0, 255).astype(np.uint8)
+    scale = 255.0 / bg
+    arr   = arr * scale
+    return arr.clip(0, 255).astype(np.uint8)
+
+
+def _is_handwriting_heavy(arr) -> bool:
+    """필기 전용 페이지 감지.
+    어두운 픽셀(< 200) 중 중간톤(30~200, 연필·흐린 볼펜)이 60% 이상 → 필기로 판단.
+    인쇄된 텍스트는 0~30(짙은 검정)에 몰려 있으므로 구분 가능."""
+    import numpy as np
+    dark = int(np.sum(arr < 200))
+    if dark < 500:    # 너무 적으면 판단 불가 (거의 흰 페이지)
+        return False
+    mid  = int(np.sum((arr >= 30) & (arr <= 200)))
+    return (mid / dark) > 0.60
 
 
 def _is_blank_page(arr) -> bool:
@@ -1303,75 +1366,105 @@ def _auto_rotate_arr(arr):
     return arr if best_k == 0 else np.rot90(arr, k=best_k)
 
 
+def _get_skip_first(file_path: str) -> int:
+    """_skip_pages.json 기준으로 이 파일의 skip_first 페이지 수 반환(기본 0)."""
+    bn = os.path.basename(file_path)
+    for key, n in _SKIP_PAGES_CFG.items():
+        if key in bn or bn in key:
+            return int(n)
+    return 0
+
+
+def _process_page_arr(arr) -> tuple:
+    """단일 페이지 grayscale 배열 전체 처리 파이프라인.
+    반환: (processed_arr, is_handwriting)  — 빈 페이지면 (None, False).
+    순서: 빈 페이지 감지 → 90°회전 → 미세기울기 보정 → 배경백색화 → 필기감지 → 강화보정
+    """
+    import numpy as np
+    if _is_blank_page(arr):
+        return (None, False)
+    arr = _auto_rotate_arr(arr)          # 1) 90° 단위 회전
+    arr = _deskew_arr(arr)               # 2) 미세 기울기 보정 ±10°
+    arr = _whiten_background(arr)        # 3) 배경 백색화
+    hw  = _is_handwriting_heavy(arr)     # 4) 필기 감지
+    arr = _enhance_pencil_page(arr, handwriting=hw)  # 5) 대비 강화
+    sharpness = 2.2 if hw else 1.8
+    pil = ImageEnhance.Sharpness(Image.fromarray(arr, "L")).enhance(sharpness)
+    return (np.array(pil), hw)
+
+
 def _make_enhanced_tempfile(file_path: str, ext: str) -> Optional[str]:
-    """이미지/스캔PDF → 빈 페이지 제거 + 자동 회전 + 연필 필기 보정 + 중복 제거된 임시 파일 반환.
-    실패 시 None(원본 사용).
-    - 단일 이미지: 빈 페이지이면 None, 아니면 자동 회전 + 보정
-    - PDF: 페이지별 [빈 페이지 제거 → 자동 회전 → 중복 제거 → 보정]
+    """이미지/스캔PDF → 전처리 파이프라인 적용 후 임시 파일 반환. 실패 시 None(원본 사용).
+    처리 순서 (각 페이지):
+      skip_first → 빈 페이지 제거 → 90°회전 → 미세기울기보정(deskew) →
+      배경백색화 → 필기감지 → 대비강화(gamma) → 선명도 → 중복제거
+    이미지 품질: 모든 중간 단계 PNG/float32, 최종 출력 PNG 300DPI (무손실).
     """
     import numpy as np
     try:
+        skip_first = _get_skip_first(file_path)
+
         if ext in ('jpg', 'jpeg', 'png', 'bmp', 'webp', 'tiff', 'tif'):
             with Image.open(file_path) as img:
                 gray = np.array(img.convert("L"))
-                if _is_blank_page(gray):
-                    logging.info(f"[ENHANCE] 빈 이미지 스킵: {os.path.basename(file_path)}")
-                    return None
-                gray         = _auto_rotate_arr(gray)
-                enhanced_arr = _enhance_pencil_page(gray)
-                pil_out = Image.fromarray(enhanced_arr, "L")
-                pil_out = ImageEnhance.Sharpness(pil_out).enhance(1.8)
-                tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-                pil_out.save(tmp.name, "PNG", dpi=(300, 300))
-                tmp.close()
-                return tmp.name
+            processed, _ = _process_page_arr(gray)
+            if processed is None:
+                logging.info(f"[ENHANCE] 빈 이미지 스킵: {os.path.basename(file_path)}")
+                return None
+            tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+            Image.fromarray(processed, "L").save(tmp.name, "PNG", dpi=(300, 300))
+            tmp.close()
+            return tmp.name
 
         elif ext == 'pdf' and PYMUPDF_AVAILABLE:
             src = fitz.open(file_path)
             dst = fitz.open()
             seen_hashes: list = []
-            n_blank, n_dup = 0, 0
+            n_blank = n_dup = n_skip = 0
 
-            for page in src:
-                mat = fitz.Matrix(2, 2)  # 300 DPI 렌더 (PDF 메타 회전 자동 반영)
+            for page_idx, page in enumerate(src):
+                # ── skip_first: 접힘/불량 첫 N페이지 강제 스킵 ──
+                if page_idx < skip_first:
+                    n_skip += 1
+                    continue
+
+                mat = fitz.Matrix(2, 2)  # 300 DPI (PDF 메타 회전 자동 반영)
                 pix = page.get_pixmap(matrix=mat, colorspace=fitz.csGRAY)
-                arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width).copy()
+                arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
+                    pix.height, pix.width
+                ).copy()
 
-                # ── 1) 빈 페이지 감지 ──
-                if _is_blank_page(arr):
+                # ── 전처리 파이프라인 (빈 페이지·회전·deskew·백색화·필기감지·보정) ──
+                processed, hw = _process_page_arr(arr)
+                if processed is None:
                     n_blank += 1
                     continue
 
-                # ── 2) 자동 회전 (컨텐츠 기반 0/90/180/270°) ──
-                arr = _auto_rotate_arr(arr)
-
-                # ── 3) 중복 감지: 해밍 거리 < 6 ──
-                ph     = _page_phash(arr)
+                # ── 중복 감지 (보정 후 해시 비교) ──
+                ph     = _page_phash(processed)
                 is_dup = any(_hamming(ph, prev) < 6 for prev in seen_hashes)
                 if is_dup:
                     n_dup += 1
                     continue
                 seen_hashes.append(ph)
 
-                # ── 4) 보정 (auto-level + gamma + sharpness) ──
-                enhanced_arr = _enhance_pencil_page(arr)
-                h_out, w_out = enhanced_arr.shape
-                pil_out  = Image.fromarray(enhanced_arr, "L")
-                pil_out  = ImageEnhance.Sharpness(pil_out).enhance(1.8)
-                new_page = dst.new_page(width=w_out / 2, height=h_out / 2)  # 2x 렌더 → 원본 크기로
+                # ── PDF에 삽입 (원본 해상도 유지: 2x렌더 → /2 크기로 페이지 생성) ──
+                h_out, w_out = processed.shape
+                new_page = dst.new_page(width=w_out / 2, height=h_out / 2)
                 buf = io.BytesIO()
-                pil_out.save(buf, "PNG")
+                Image.fromarray(processed, "L").save(buf, "PNG")  # 무손실 PNG
                 new_page.insert_image(new_page.rect, stream=buf.getvalue())
 
             src.close()
-            if n_blank or n_dup:
-                logging.info(
-                    f"[ENHANCE] {os.path.basename(file_path)}: "
-                    f"빈 페이지 {n_blank}개 / 중복 {n_dup}개 제거"
-                )
+            stats = []
+            if n_skip:  stats.append(f"강제스킵 {n_skip}p")
+            if n_blank: stats.append(f"빈페이지 {n_blank}p")
+            if n_dup:   stats.append(f"중복 {n_dup}p")
+            if stats:
+                logging.info(f"[ENHANCE] {os.path.basename(file_path)}: {', '.join(stats)} 제거")
             if dst.page_count == 0:
                 dst.close()
-                return None  # 전부 빈/중복이면 원본 사용
+                return None
             tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
             dst.save(tmp.name)
             dst.close()
