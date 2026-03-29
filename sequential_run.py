@@ -65,10 +65,11 @@ FOLDERS = [
     resolve_takeout_path(),
 ]
 VM_MONITOR    = os.path.join(PROJECT_DIR, "_vm_monitor.py")
-QDRANT_EXE    = os.path.join(PROJECT_DIR, "qdrant_server", "qdrant.exe")
+AUTOPILOT     = os.path.join(PROJECT_DIR, "_autopilot.py")
+QDRANT_EXE    = os.path.join(PROJECT_DIR, "qdrant_server", "qdrant.exe")        
 QDRANT_DATA   = os.getenv("QDRANT_SERVER_DATA", os.path.join(PROJECT_DIR, "qdrant_server_data"))
 _vm_mon_proc  = None
-_qdrant_proc  = None
+_autopilot_proc = None
 
 
 def ensure_qdrant_server():
@@ -135,7 +136,34 @@ def stop_vm_monitor():
             _vm_mon_proc.kill()
     _vm_mon_proc = None
 
+
+def start_autopilot():
+    """오토파일럿 데몬 백그라운드 시작"""
+    global _autopilot_proc
+    if not os.path.exists(AUTOPILOT):
+        return
+    _autopilot_proc = subprocess.Popen(
+        [PYTHON_EXE, "-u", "-X", "utf8", AUTOPILOT],
+        creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+        stdout=open(os.path.join(PROJECT_DIR, "autopilot.log"), "a", encoding="utf-8"),
+        stderr=subprocess.STDOUT,
+    )
+    print(f"  [AUTOPILOT] 시작 (PID {_autopilot_proc.pid})")
+
+
+def stop_autopilot():
+    global _autopilot_proc
+    if _autopilot_proc and _autopilot_proc.poll() is None:
+        _autopilot_proc.terminate()
+        try:
+            _autopilot_proc.wait(timeout=10)
+        except Exception:
+            _autopilot_proc.kill()
+    _autopilot_proc = None
+
+
 atexit.register(stop_vm_monitor)
+atexit.register(stop_autopilot)
 
 def count_processed():
     if not os.path.exists(STATE_DB_PATH):
@@ -165,6 +193,7 @@ def run_folder(folder):
 if __name__ == "__main__":
     ensure_qdrant_server()
     start_vm_monitor()
+    start_autopilot()
 
     try:
         for folder in FOLDERS:

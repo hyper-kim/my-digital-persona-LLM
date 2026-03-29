@@ -138,6 +138,32 @@ def monitor_loop():
         if not VM_NAME or not VM_ZONE:
             continue
 
+        # ── VM RUNNING인데 SSH 연속실패 → IP 변경 감지 ──
+        if consec_fail >= 5 and vm_state == "RUNNING":
+            logging.info(f"VM RUNNING 상태인데 SSH 연속실패 {consec_fail}회 → IP 변경 여부 확인")
+            try:
+                import _vm_manager as m
+                actual_ip = m.get_external_ip()
+                env_ip = os.getenv("CLOUD_VM_IP", "")
+                if actual_ip and actual_ip != env_ip:
+                    logging.info(f"IP 변경 감지: {env_ip} → {actual_ip}, .env 업데이트")
+                    _call_manager_ip(actual_ip)
+                    consec_fail = 0
+                    last_vm_api = 0
+                else:
+                    logging.info(f"IP 동일({actual_ip}), VM 자체 문제 → 재시작 시도")
+                    r = _call_manager("stop_vm")
+                    time.sleep(10)
+                    r = _call_manager("start_vm")
+                    logging.info(f"VM restart = {r}")
+                    vm_state = "STAGING"
+                    vm_started_t = now
+                    consec_fail = 0
+                    last_vm_api = 0
+            except Exception as e:
+                logging.error(f"IP 확인 실패: {e}")
+                consec_fail = 0
+
         # ── VM 시작 조건 ──
         # 연속 실패 5개 이상이고 VM이 꺼져있음 → 재시작
         if consec_fail >= 5 and vm_state != "RUNNING":
