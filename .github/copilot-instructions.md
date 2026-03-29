@@ -75,7 +75,7 @@ Google Drive(OneNote/Drive 파일) → 수집 → Qdrant 벡터DB → 편입 상
 - **존**: `us-east1-c`
 - **프로비저닝**: `STANDARD` (Spot → Standard 전환, commit ec4108c)
   - Spot은 Google이 선점 시 인스턴스+디스크 완전 삭제됨 → Standard 사용
-- **현재 IP**: `34.24.238.116` (VM 재생성 후 `.env` 자동 업데이트됨)
+- **현재 IP**: `34.75.63.124` (VM 재생성 후 `.env` 자동 업데이트됨)
 - **SA 키**: `C:\Users\kjy\.ssh\project-1ffe4ac8-e493-4a26-ac3-9adced7fa7f2.json`
 - **SSH 개인키**: `C:\Users\kjy\.ssh\gcp_key_fixed`
 - **SSH 공개키**: `C:\Users\kjy\.ssh\gcp_key_fixed.pub`
@@ -99,8 +99,8 @@ ADVISOR_TEMPERATURE=0.6
 GCP_VM_NAME=mydigitalpersonaembedder
 GCP_VM_ZONE=us-east1-c
 GCP_PROJECT_ID=project-1ffe4ac8-e493-4a26-ac3
-CLOUD_VM_IP=34.24.238.116           # VM 재생성 시 _vm_manager.update_env_ip()로 자동 교체
-CLOUD_OLLAMA_URL=http://34.24.238.116:11434
+CLOUD_VM_IP=34.75.63.124           # VM 재생성 시 _vm_manager.update_env_ip()로 자동 교체
+CLOUD_OLLAMA_URL=http://34.75.63.124:11434
 VM_IDLE_TIMEOUT_MIN=10
 USE_GCP_SSH_OCR=true
 MAX_GCP_WORKERS=8
@@ -147,11 +147,14 @@ PDF_CHUNK_PAGES=5                   # 기본값 30 → 5로 축소 (최대 병�
 > 파일만 봐서는 알 수 없는 내용이므로 새 세션 시작 시 반드시 확인하세요.
 
 ### VM 상태 (2026-03-29 기준)
-- `mydigitalpersonaembedder` 방금 재생성됨 (Standard, IP `34.24.238.116`)
-- **`vm_setup.sh` 실행 중** — Ubuntu 22.04 + CUDA + Ollama + qwen3-vl:8b 설치 (~10–15분)
-- SSH 접속 가능 여부 확인 후 파이프라인 재시작 필요: `python sequential_run.py`
-- VM SSH 준비 확인: `ssh -i C:\Users\kjy\.ssh\gcp_key_fixed kjy@34.24.238.116`
-- **gcloud CLI 미설치** (확인됨) → GCP 관리는 `_vm_manager.py` REST API로만 수행
+- `mydigitalpersonaembedder` RUNNING, IP `34.75.63.124` (재시작 후 IP 변경됨)
+- **GPU 드라이버 정상**: nvidia-smi NVIDIA L4, CUDA 13.2 확인됨
+  - 원인: vm_setup.sh에서 GCC 11로 nvidia-dkms DKMS 빌드 실패 → GCC 12 수동 설치로 해결
+  - vm_setup.sh 수정 완료 (GCC 12 자동 설치, export HOME=/root, modprobe 추가)
+- **qwen3-vl:8b 모델 pull 진행 중** (~10분, PID 2923)
+  - 원인: 스타트업 스크립트 root 실행 시 $HOME 미정의 panic → `export HOME=/root` 추가로 해결
+- pull 완료 후 `sequential_run.py`로 파이프라인 재시작 가능
+- ⚠️ VM 재시작마다 External IP가 바뀜 → `_vm_manager.get_external_ip()` + `update_env_ip()` 항상 실행 필요
 
 ### 파이프라인 진행도 (마지막 확인 기준)
 - `processed_files.db` 처리완료: **약 11,224건**, 실패: **약 287건**
@@ -167,10 +170,11 @@ PDF_CHUNK_PAGES=5                   # 기본값 30 → 5로 축소 (최대 병�
   - 실질적 편입 데이터 없음 → 대체 URL 또는 Playwright 도입 검토 필요
 
 ### 다음 할 일 (우선순위 순)
-1. VM SSH 접속 확인 → 파이프라인 재시작
-2. `.env` `SEARCH_MODEL=gemma3:12b` → `qwen3:14b` 변경
-3. Cornell IRP / UPenn 크롤 대체 URL 탐색 (JS 렌더링 우회)
-4. `_monitor.py` 띄워서 진행 상황 감시: `python _monitor.py`
+1. qwen3-vl:8b pull 완료 확인: `ssh kjy@34.75.63.124 "ollama list"`
+2. 파이프라인 재시작: `python sequential_run.py`
+3. `.env` `SEARCH_MODEL=gemma3:12b` → `qwen3:14b` 변경
+4. Cornell IRP / UPenn 크롤 대체 URL 탐색 (JS 렌더링 우회)
+5. `_monitor.py` 띄워서 진행 상황 감시: `python _monitor.py`
 
 ## 코딩 규칙
 - 파이썬 파일은 반드시 `# -X utf8` 인코딩으로 실행

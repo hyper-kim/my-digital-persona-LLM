@@ -10,11 +10,21 @@ echo "[$(date)] NVIDIA 드라이버 설치 중..." | tee -a $LOG
 sudo apt-get update -qq
 sudo apt-get install -y linux-headers-$(uname -r) 2>&1 | tail -3
 
-# CUDA 12.x repo 등록
+# GCC 12 설치 — 커널 6.8+ 에서 nvidia-dkms DKMS 빌드 시 필요
+# (GCC 11은 -ftrivial-auto-var-init=zero 미지원 → 빌드 실패)
+sudo apt-get install -y gcc-12 2>&1 | tail -3
+sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 12
+
+# CUDA repo 등록
 wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
 sudo dpkg -i cuda-keyring_1.1-1_all.deb
 sudo apt-get update -qq
-sudo apt-get install -y cuda-drivers 2>&1 | tail -5
+# dpkg 에러 무시 후 -f로 재시도 (dkms 빌드 실패 시 복구)
+sudo apt-get install -y cuda-drivers 2>&1 | tail -5 || true
+sudo apt-get install -f -y 2>&1 | tail -3 || true
+
+# 드라이버 모듈 로드 (재부팅 없이)
+sudo modprobe nvidia 2>/dev/null || true
 echo "[$(date)] NVIDIA 드라이버 설치 완료" | tee -a $LOG
 
 # ── 2. Ollama 설치 ────────────────────────────────────────────────────────────
@@ -35,8 +45,10 @@ sudo systemctl restart ollama
 echo "[$(date)] Ollama 설치 및 시작 완료" | tee -a $LOG
 
 # ── 3. qwen3-vl:8b 모델 다운로드 ─────────────────────────────────────────────
-echo "[$(date)] qwen3-vl:8b 다운로드 중 (약 5GB, 시간 소요)..." | tee -a $LOG
+echo "[$(date)] qwen3-vl:8b 다운로드 중 (약 6GB, 시간 소요)..." | tee -a $LOG
 sleep 5  # ollama 서비스 기동 대기
+# $HOME 미정의 panic 방지 — 스타트업 스크립트는 root로 실행되지만 HOME이 없음
+export HOME=/root
 ollama pull qwen3-vl:8b 2>&1 | tail -5
 echo "[$(date)] qwen3-vl:8b 다운로드 완료" | tee -a $LOG
 
