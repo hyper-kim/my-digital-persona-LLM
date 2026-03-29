@@ -1280,17 +1280,44 @@ def _hamming(h1: tuple, h2: tuple) -> int:
     return sum(a != b for a, b in zip(h1, h2))
 
 
+def _is_blank_page(arr) -> bool:
+    """grayscale uint8 배열이 빈 페이지인지 판단.
+    표준편차 < 12 (거의 균일한 흰 배경) → 빈 페이지로 간주."""
+    import numpy as np
+    return float(np.std(arr.astype(np.float32))) < 12.0
+
+
+def _auto_rotate_arr(arr):
+    """grayscale uint8 배열의 텍스트 방향 자동 감지 → 0/90/180/270도 중 최적 회전 반환.
+    Horizontal projection variance 휴리스틱 사용 (tesseract 불필요).
+    텍스트 줄이 수평일 때 행별 어두운 픽셀 수의 분산이 최대가 되는 원리."""
+    import numpy as np
+    best_var, best_k = -1.0, 0
+    for k in (0, 1, 2, 3):  # k=0:0°, k=1:90°, k=2:180°, k=3:270°
+        rotated  = arr if k == 0 else np.rot90(arr, k=k)
+        binary   = (rotated < 128).astype(np.float32)  # 어두운 픽셀 = 텍스트
+        row_sums = binary.sum(axis=1)
+        variance = float(np.var(row_sums))
+        if variance > best_var:
+            best_var, best_k = variance, k
+    return arr if best_k == 0 else np.rot90(arr, k=best_k)
+
+
 def _make_enhanced_tempfile(file_path: str, ext: str) -> Optional[str]:
-    """이미지/스캔PDF → 연필 필기 보정 + 중복 페이지 제거된 임시 파일 반환.
+    """이미지/스캔PDF → 빈 페이지 제거 + 자동 회전 + 연필 필기 보정 + 중복 제거된 임시 파일 반환.
     실패 시 None(원본 사용).
-    - 단일 이미지: 보정만
-    - PDF: 페이지별 보정 + 시각적 중복(phash 해밍거리<6) 제거
+    - 단일 이미지: 빈 페이지이면 None, 아니면 자동 회전 + 보정
+    - PDF: 페이지별 [빈 페이지 제거 → 자동 회전 → 중복 제거 → 보정]
     """
     import numpy as np
     try:
         if ext in ('jpg', 'jpeg', 'png', 'bmp', 'webp', 'tiff', 'tif'):
             with Image.open(file_path) as img:
                 gray = np.array(img.convert("L"))
+                if _is_blank_page(gray):
+                    logging.info(f"[ENHANCE] 빈 이미지 스킵: {os.path.basename(file_path)}")
+                    return None
+                gray         = _auto_rotate_arr(gray)
                 enhanced_arr = _enhance_pencil_page(gray)
                 pil_out = Image.fromarray(enhanced_arr, "L")
                 pil_out = ImageEnhance.Sharpness(pil_out).enhance(1.8)
@@ -1302,37 +1329,49 @@ def _make_enhanced_tempfile(file_path: str, ext: str) -> Optional[str]:
         elif ext == 'pdf' and PYMUPDF_AVAILABLE:
             src = fitz.open(file_path)
             dst = fitz.open()
-            seen_hashes: list = []   # 이미 포함된 페이지 해시 목록
-            skipped = 0
+            seen_hashes: list = []
+            n_blank, n_dup = 0, 0
 
             for page in src:
-                mat = fitz.Matrix(2, 2)  # 300 DPI 렌더
+                mat = fitz.Matrix(2, 2)  # 300 DPI 렌더 (PDF 메타 회전 자동 반영)
                 pix = page.get_pixmap(matrix=mat, colorspace=fitz.csGRAY)
                 arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width).copy()
 
-                # ── 중복 감지: 기존 페이지와 해밍 거리 < 6이면 중복으로 판단 ──
-                ph = _page_phash(arr)
+                # ── 1) 빈 페이지 감지 ──
+                if _is_blank_page(arr):
+                    n_blank += 1
+                    continue
+
+                # ── 2) 자동 회전 (컨텐츠 기반 0/90/180/270°) ──
+                arr = _auto_rotate_arr(arr)
+
+                # ── 3) 중복 감지: 해밍 거리 < 6 ──
+                ph     = _page_phash(arr)
                 is_dup = any(_hamming(ph, prev) < 6 for prev in seen_hashes)
                 if is_dup:
-                    skipped += 1
+                    n_dup += 1
                     continue
                 seen_hashes.append(ph)
 
-                # ── 보정 ──
+                # ── 4) 보정 (auto-level + gamma + sharpness) ──
                 enhanced_arr = _enhance_pencil_page(arr)
-                pil_out = Image.fromarray(enhanced_arr, "L")
-                pil_out = ImageEnhance.Sharpness(pil_out).enhance(1.8)
-                new_page = dst.new_page(width=page.rect.width, height=page.rect.height)
+                h_out, w_out = enhanced_arr.shape
+                pil_out  = Image.fromarray(enhanced_arr, "L")
+                pil_out  = ImageEnhance.Sharpness(pil_out).enhance(1.8)
+                new_page = dst.new_page(width=w_out / 2, height=h_out / 2)  # 2x 렌더 → 원본 크기로
                 buf = io.BytesIO()
                 pil_out.save(buf, "PNG")
                 new_page.insert_image(new_page.rect, stream=buf.getvalue())
 
             src.close()
-            if skipped:
-                logging.info(f"[ENHANCE] 중복 페이지 {skipped}개 제거: {os.path.basename(file_path)}")
+            if n_blank or n_dup:
+                logging.info(
+                    f"[ENHANCE] {os.path.basename(file_path)}: "
+                    f"빈 페이지 {n_blank}개 / 중복 {n_dup}개 제거"
+                )
             if dst.page_count == 0:
                 dst.close()
-                return None  # 전부 중복이면 원본 사용
+                return None  # 전부 빈/중복이면 원본 사용
             tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
             dst.save(tmp.name)
             dst.close()
