@@ -138,10 +138,25 @@ def stop_vm_monitor():
 
 
 def start_autopilot():
-    """오토파일럿 데몬 백그라운드 시작"""
+    """오토파일럿 데몬 백그라운드 시작 (이미 실행 중이면 스킵)"""
     global _autopilot_proc
     if not os.path.exists(AUTOPILOT):
         return
+    # 이미 실행 중인 autopilot 확인
+    try:
+        import subprocess as _sp
+        r = _sp.run(
+            ["wmic", "process", "where",
+             "(Name like '%python%' AND CommandLine like '%_autopilot.py%')",
+             "get", "ProcessId", "/value"],
+            capture_output=True, text=True, timeout=5
+        )
+        pids = [int(m) for m in __import__("re").findall(r"ProcessId=(\d+)", r.stdout)]
+        if pids:
+            print(f"  [AUTOPILOT] 이미 실행 중 (PID {pids[0]}) — 스킵")
+            return
+    except Exception:
+        pass
     _autopilot_proc = subprocess.Popen(
         [PYTHON_EXE, "-u", "-X", "utf8", AUTOPILOT],
         creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),

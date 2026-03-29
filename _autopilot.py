@@ -29,6 +29,20 @@ PYTHON_EXE   = VENV_PY if os.path.exists(VENV_PY) else sys.executable
 SSH_KEY      = r"C:\Users\kjy\.ssh\gcp_key_fixed"
 VM_USER      = "kjy"
 
+# 부모 프로세스가 sequential_run.py인지 확인 (중복 생성 방지)
+def _parent_is_sequential() -> bool:
+    try:
+        import psutil
+        parent = psutil.Process(os.getpid()).parent()
+        if parent is None:
+            return False
+        cmdline = parent.cmdline()
+        return any("sequential_run" in arg for arg in cmdline)
+    except Exception:
+        return False
+
+_SPAWNED_BY_SEQUENTIAL = _parent_is_sequential()
+
 load_dotenv()
 
 # ── 로깅 ───────────────────────────────────────────────────────────────
@@ -175,34 +189,6 @@ def clear_connection_errors():
         return 0
 
 
-def ensure_vm_monitor():
-    """_vm_monitor.py 실행 중인지 확인 → 없으면 재시작"""
-    pids = running_pids("_vm_monitor.py")
-    # 2개 이상 중복 → 1개만 남김
-    if len(pids) > 1:
-        log.info(f"[VMM] 중복 실행 {len(pids)}개 → 1개만 유지")
-        kill_pids(pids[1:], "_vm_monitor")
-        return
-    if len(pids) == 0:
-        log.info("[VMM] _vm_monitor.py 없음 → 재시작")
-        start_bg("_vm_monitor.py", label="vm_monitor")
-
-
-def ensure_pipeline():
-    """sequential_run.py + run_watchdog.py 생존 확인 → 죽어있으면 재시작"""
-    seq_pids = running_pids("sequential_run.py")
-    wdg_pids = running_pids("run_watchdog.py")
-
-    if not seq_pids and not wdg_pids:
-        log.info("[PIPE] sequential_run.py + watchdog 모두 없음 → sequential_run 재시작")
-        start_bg("sequential_run.py", label="sequential_run")
-        return
-
-    # watchdog만 없는 경우 (sequential_run이 다음 폴더 실행 전 대기 중이면 정상)
-    if seq_pids and not wdg_pids:
-        log.info("[PIPE] watchdog 없음 (폴더 전환 중일 수 있음) — 1분 후 재확인")
-
-
 def detect_and_fix_stall(prev_count: int, stall_since: float) -> tuple:
     """
     처리건수 증가 없으면 stall 감지 → 20분 이상이면 파이프라인 재시작
@@ -219,13 +205,14 @@ def detect_and_fix_stall(prev_count: int, stall_since: float) -> tuple:
 
     stall_min = (now - stall_since) / 60
     if stall_min >= 20:
-        log.warning(f"[STALL] {stall_min:.0f}분째 처리 정지 → 파이프라인 재시작")
-        # ingest만 재시작 (sequential_run은 유지)
+        log.warning(f"[STALL] {stall_min:.0f}분째 처리 정지 → ingest 재시작")
+        # ingest만 재시작 (watchdog이 자동으로 재시작해줌)
         ingest_pids = running_pids("1_ingest_data.py")
         if ingest_pids:
             kill_pids(ingest_pids, "1_ingest_data")
-        # watchdog이 재시작하게 내버려둠 (없으면 sequential_run이 재실행)
-        ensure_pipeline()
+            log.info("[STALL] 1_ingest_data.py 종료 → watchdog이 재시작 예정")
+        else:
+            log.warning("[STALL] ingest 프로세스 없음 — watchdog도 확인 필요")
         return count, 0.0  # 재시작 후 카운터 리셋
 
     return count, stall_since
@@ -237,7 +224,10 @@ def fix_ops_agent():
     if not ip:
         return
     rc, out = ssh_run(ip, "systemctl is-active google-cloud-ops-agent 2>&1", timeout=15)
-    if rc != 0 or "inactive" in out or "failed" in out:
+    if rc == -1 or not out:
+        # SSH 연결 자체 실패 (VM 아직 시작 중) → 무시
+        return
+    if rc != 0 or out.strip() not in ("active", "activating"):
         log.info(f"[OPS] Ops Agent 상태: '{out}' → 복구 시도")
         if "not-found" in out or "could not be found" in out:
             log.info("[OPS] Ops Agent 미설치 → 설치 중...")
@@ -250,7 +240,6 @@ def fix_ops_agent():
         else:
             rc2, out2 = ssh_run(ip, "sudo systemctl restart google-cloud-ops-agent 2>&1", timeout=20)
             log.info(f"[OPS] 재시작 결과: rc={rc2} {out2}")
-    # GPU(nvml) 메트릭은 설치 직후 자동 수집 안 됨 → 별도 설정 없이 기본 메트릭만 사용
 
 
 def check_vm_health():
@@ -271,30 +260,33 @@ def check_vm_health():
 def autopilot_loop():
     log.info("=" * 60)
     log.info("오토파일럿 시작 — 이제부터 내가 관리합니다")
+    log.info(f"부모=sequential_run: {_SPAWNED_BY_SEQUENTIAL}")
     log.info("=" * 60)
+
+    # 다른 autopilot 인스턴스 중복 제거
+    my_pid = os.getpid()
+    other_pids = [p for p in running_pids("_autopilot.py") if p != my_pid]
+    if other_pids:
+        log.info(f"[INIT] 중복 autopilot {other_pids} 종료")
+        kill_pids(other_pids, "_autopilot")
 
     last_ip_check    = 0.0
     last_conn_clear  = 0.0
     last_stall_check = 0.0
     last_ops_check   = 0.0
     last_health      = 0.0
-    last_proc_check  = 0.0
 
     stall_since      = 0.0
     prev_count       = db_count()
 
-    # 시작 즉시 IP 확인
+    # 시작 즉시 IP 확인 + 연결오류 정리 (프로세스 체크는 60초 후부터)
     fix_vm_ip()
     clear_connection_errors()
+    last_ip_check   = time.time()
+    last_conn_clear = time.time()
 
     while not _stop.wait(30):  # 30초마다 깨어남
         now = time.time()
-
-        # [30초] 프로세스 생존 확인
-        if now - last_proc_check >= 30:
-            ensure_vm_monitor()
-            ensure_pipeline()
-            last_proc_check = now
 
         # [5분] VM IP 변경 감지
         if now - last_ip_check >= 300:
