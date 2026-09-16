@@ -14,7 +14,7 @@ _autopilot.py — 완전 자율 파이프라인 감시/복구 데몬
 실행: venv\Scripts\python.exe -u -X utf8 _autopilot.py
 """
 
-import os, sys, re, time, sqlite3, subprocess, logging, signal, threading
+import os, sys, re, time, json, sqlite3, subprocess, logging, signal, threading
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -24,6 +24,8 @@ if hasattr(sys.stdout, "reconfigure"):
 PROJECT_DIR  = os.path.dirname(os.path.abspath(__file__))
 DB_PATH      = os.path.join(PROJECT_DIR, "processed_files.db")
 LOG_PATH     = os.path.join(PROJECT_DIR, "autopilot.log")
+COMMAND_DIR  = os.path.join(PROJECT_DIR, "autopilot_commands")
+DONE_DIR     = os.path.join(PROJECT_DIR, "autopilot_commands_done")
 VENV_PY      = os.path.join(PROJECT_DIR, "venv", "Scripts", "python.exe")
 PYTHON_EXE   = VENV_PY if os.path.exists(VENV_PY) else sys.executable
 SSH_KEY      = r"C:\Users\kjy\.ssh\gcp_key_fixed"
@@ -63,6 +65,11 @@ _stop = threading.Event()
 # ── 유틸 ───────────────────────────────────────────────────────────────
 def reload_env():
     load_dotenv(override=True)
+
+
+def ensure_command_dirs():
+    os.makedirs(COMMAND_DIR, exist_ok=True)
+    os.makedirs(DONE_DIR, exist_ok=True)
 
 
 def get_env_ip() -> str:
@@ -256,9 +263,119 @@ def check_vm_health():
         log.info(f"[VM-HEALTH] {out.replace(chr(10), ' | ')}")
 
 
+def _update_env_key(env_key: str, env_value: str) -> tuple[bool, str]:
+    """.env의 단일 키를 업데이트 (없으면 추가)"""
+    env_file = os.path.join(PROJECT_DIR, ".env")
+    if not os.path.exists(env_file):
+        return False, ".env 파일이 없습니다"
+
+    try:
+        with open(env_file, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+
+        pattern = re.compile(rf"^\s*{re.escape(env_key)}\s*=")
+        replaced = False
+        for i, line in enumerate(lines):
+            if pattern.match(line):
+                lines[i] = f"{env_key}={env_value}\n"
+                replaced = True
+                break
+
+        if not replaced:
+            if lines and not lines[-1].endswith("\n"):
+                lines[-1] += "\n"
+            lines.append(f"{env_key}={env_value}\n")
+
+        with open(env_file, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+
+        reload_env()
+        return True, f"{env_key} 업데이트 완료"
+    except Exception as e:
+        return False, f".env 업데이트 실패: {e}"
+
+
+def _handle_command(cmd: dict) -> dict:
+    """단일 명령 실행 후 결과 dict 반환"""
+    action = (cmd.get("action") or "").strip().lower()
+    payload = cmd.get("payload") or {}
+    note = (payload.get("note") or "").strip()
+
+    if action == "note":
+        return {"ok": True, "message": f"노트 수신: {note[:120]}"}
+
+    if action == "refresh_vm_ip":
+        changed = fix_vm_ip()
+        return {"ok": True, "message": f"VM IP 점검 완료 (변경={changed})"}
+
+    if action == "clear_conn_errors":
+        cnt = clear_connection_errors()
+        return {"ok": True, "message": f"연결오류 재큐 처리 {cnt}건"}
+
+    if action == "restart_ingest":
+        ingest_pids = running_pids("1_ingest_data.py")
+        if ingest_pids:
+            kill_pids(ingest_pids, "1_ingest_data")
+            return {"ok": True, "message": f"ingest 재시작 트리거 (종료 PID={ingest_pids})"}
+        return {"ok": True, "message": "실행 중 ingest 없음 (watchdog/sequential이 필요 시 재기동)"}
+
+    if action == "restart_ui":
+        ui_pids = running_pids("5_transfer_ui.py")
+        if ui_pids:
+            kill_pids(ui_pids, "5_transfer_ui")
+        start_bg("5_transfer_ui.py", label="5_transfer_ui")
+        return {"ok": True, "message": "UI 재시작 완료"}
+
+    if action == "set_env":
+        allowed = {
+            "SEARCH_MODEL",
+            "ADVISOR_MODEL",
+            "ADVISOR_TEMPERATURE",
+            "USE_LLM_FOR_INQUIRY_DRAFT",
+            "AUTO_SEND_CRITICAL_EMAIL",
+        }
+        env_key = (payload.get("key") or "").strip()
+        env_value = str(payload.get("value") or "").strip()
+        if env_key not in allowed:
+            return {"ok": False, "message": f"허용되지 않은 env key: {env_key}"}
+        if not env_value:
+            return {"ok": False, "message": "env value가 비어 있습니다"}
+        ok, msg = _update_env_key(env_key, env_value)
+        return {"ok": ok, "message": msg}
+
+    return {"ok": False, "message": f"알 수 없는 action: {action}"}
+
+
+def process_command_queue():
+    """UI가 생성한 명령 파일을 실행하고 완료 디렉터리로 이동"""
+    ensure_command_dirs()
+    files = sorted(
+        fn for fn in os.listdir(COMMAND_DIR)
+        if fn.lower().endswith(".json")
+    )
+    for fn in files:
+        src = os.path.join(COMMAND_DIR, fn)
+        done = os.path.join(DONE_DIR, fn)
+        try:
+            with open(src, "r", encoding="utf-8") as f:
+                cmd = json.load(f)
+            result = _handle_command(cmd)
+            cmd["processed_at"] = datetime.now().isoformat()
+            cmd["result"] = result
+            with open(done, "w", encoding="utf-8") as f:
+                json.dump(cmd, f, ensure_ascii=False, indent=2)
+            os.remove(src)
+            state = "OK" if result.get("ok") else "FAIL"
+            log.info(f"[CMD] {state} {fn} - {result.get('message', '')}")
+        except Exception as e:
+            log.error(f"[CMD] 처리 실패 {fn}: {e}")
+
+
 # ── 메인 루프 ──────────────────────────────────────────────────────────
 def autopilot_loop():
     log.info("=" * 60)
+
+    ensure_command_dirs()
     log.info("오토파일럿 시작 — 이제부터 내가 관리합니다")
     log.info(f"부모=sequential_run: {_SPAWNED_BY_SEQUENTIAL}")
     log.info("=" * 60)
@@ -287,6 +404,9 @@ def autopilot_loop():
 
     while not _stop.wait(30):  # 30초마다 깨어남
         now = time.time()
+
+        # [30초] UI 명령 큐 처리
+        process_command_queue()
 
         # [5분] VM IP 변경 감지
         if now - last_ip_check >= 300:

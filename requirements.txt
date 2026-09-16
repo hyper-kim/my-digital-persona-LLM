@@ -23,3 +23,5 @@ pyautogui
 pyperclip
 pygetwindow
 python-dotenv
+selenium
+webdriver-manager

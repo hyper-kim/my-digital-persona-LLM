@@ -101,6 +101,13 @@ USE_NAVER_WORKS      = os.getenv("USE_NAVER_WORKS", "false").lower() == "true"
 
 # 안전 제한
 MAX_SENDS_PER_HOUR = int(os.getenv("MAX_EMAIL_PER_HOUR", "10"))
+SMTP_TIMEOUT_SEC = int(os.getenv("SMTP_TIMEOUT_SEC", "12"))
+ALLOW_NON_EDU_IMPORTANT_SENDERS = os.getenv("ALLOW_NON_EDU_IMPORTANT_SENDERS", "false").lower() == "true"
+EXTRA_ALLOWED_IMPORTANT_SENDER_DOMAINS = {
+    d.strip().lower()
+    for d in os.getenv("EXTRA_ALLOWED_IMPORTANT_SENDER_DOMAINS", "").split(",")
+    if d.strip()
+}
 
 # 사용자 프로필
 try:
@@ -136,15 +143,41 @@ EMAIL_TYPES = {
         ],
     },
     "rec_request": {
-        "label": "추천서 요청",
+        "label": "추천서 요청 (영문)",
         "subject_hint": "Letter of Recommendation Request for US Transfer — [SCHOOL]",
-        "description": "교수님/선생님께 추천서 요청",
+        "description": "교수님/선생님께 영어로 추천서 요청",
         "tips": [
             "최소 6주 전에 요청",
-            "제출 마감일 명시",
+            "제출 마감일(학교별) 명시",
             "지원하는 학교 목록 첨부",
-            "본인의 수업에서 기억에 남는 에피소드 언급",
+            "본인의 수업에서 기억에 남는 에피소드 1~2개 언급",
             "Common App 초대 링크 발송 예정 명시",
+            "추천인 부담 줄이기: 성적표·이력서·에세이 초안 첨부 제안",
+        ],
+    },
+    "rec_korean": {
+        "label": "추천서 요청 (한국어)",
+        "subject_hint": "[학교명] 편입 추천서 요청 — [교수님 성함]",
+        "description": "한국 교수님/선생님께 한국어로 추천서 요청",
+        "tips": [
+            "정중한 경어 사용 (합쇼체)",
+            "제출 플랫폼(Common App/Coalition) 구체적으로 설명",
+            "마감일 학교별로 나열",
+            "본인 수업에서 기억에 남는 경험 서술",
+            "교수님 부담 최소화: 영문 CV·성적표 첨부 예정 명시",
+            "오프라인 면담 요청 선택지 제공",
+        ],
+    },
+    "rec_followup": {
+        "label": "추천서 제출 확인",
+        "subject_hint": "Re: LoR Request — Submission Confirmation",
+        "description": "추천서 제출 여부 정중하게 확인 (마감 1주 전)",
+        "tips": [
+            "1회만 follow-up",
+            "정중하고 간결하게 (5문장 이내)",
+            "마감일 다시 명시",
+            "플랫폼 링크 재첨부",
+            "영어/한국어 선택 가능",
         ],
     },
     "doc_request": {
@@ -194,6 +227,10 @@ ADMISSIONS_EMAILS = {
     "upenn":     "info@admissions.upenn.edu",
     "mit":       "admissions@mit.edu",
     "columbia":  "ugrad-ask@columbia.edu",
+    "northwestern": "ug-admission@northwestern.edu",
+    "uiuc":      "admissions@illinois.edu",
+    "purdue":    "admissions@purdue.edu",
+    "uchicago":  "collegeadmissions@uchicago.edu",
     "yale":      "student.questions@yale.edu",
     "princeton": "uaoffice@princeton.edu",
 }
@@ -210,6 +247,39 @@ IMPORTANT_SENDER_KEYWORDS = [
     ".edu", "admissions", "undergrad", "ugrad", "application", "transfer",
     "stanford", "cornell", "upenn", "nyu", "columbia", "mit", "princeton", "yale",
 ]
+
+
+def _extract_email_address(raw: str) -> str:
+    """헤더 문자열에서 이메일 주소만 추출."""
+    if not raw:
+        return ""
+    m = re.search(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", raw, flags=re.I)
+    return (m.group(0).strip().lower() if m else "")
+
+
+def _email_domain(addr: str) -> str:
+    if "@" not in (addr or ""):
+        return ""
+    return addr.rsplit("@", 1)[1].strip().lower()
+
+
+def _is_allowed_important_sender(sender_raw: str) -> bool:
+    """중요메일 요약에 허용할 발신자 도메인 검증(.edu 기본 강제)."""
+    addr = _extract_email_address(sender_raw)
+    domain = _email_domain(addr)
+    if not domain:
+        return False
+    if domain.endswith(".edu"):
+        return True
+    if domain in EXTRA_ALLOWED_IMPORTANT_SENDER_DOMAINS:
+        return True
+    return ALLOW_NON_EDU_IMPORTANT_SENDERS
+
+
+def _is_valid_inquiry_recipient(addr: str) -> bool:
+    """입학처 문의(inquiry)는 기본적으로 .edu 수신자만 허용."""
+    domain = _email_domain((addr or "").lower())
+    return bool(domain and domain.endswith(".edu"))
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 🗄️  SQLite 발송 이력
@@ -483,6 +553,59 @@ def build_email_user_message(req: EmailRequest) -> str:
     return "\n".join(parts)
 
 
+def build_rec_request_message(
+    professor_name: str,
+    professor_email: str,
+    course_name: str,
+    semester: str,
+    episode: str,
+    schools_deadlines: str,
+    language: str = "korean",
+    followup: bool = False,
+) -> tuple[str, "EmailRequest"]:
+    """
+    구조화된 추천서 요청 이메일 메시지 + EmailRequest 빌더.
+
+    Returns (user_message_str, EmailRequest)
+    - language: 'korean' → rec_korean, 'english' → rec_request
+    - followup: True → rec_followup 타입
+    """
+    if followup:
+        etype = "rec_followup"
+    elif language == "korean":
+        etype = "rec_korean"
+    else:
+        etype = "rec_request"
+
+    lang_label = "한국어" if language == "korean" else "영어"
+    topic_parts = []
+    if course_name:
+        topic_parts.append(f"수강 과목: {course_name}" + (f" ({semester})" if semester else ""))
+    if episode:
+        topic_parts.append(f"기억에 남는 경험/에피소드: {episode}")
+    if schools_deadlines:
+        topic_parts.append(f"지원 대학 및 마감일:\n{schools_deadlines}")
+    topic_parts.append(f"이메일 작성 언어: {lang_label}")
+    if followup:
+        topic_parts.append("※ 이미 요청 드린 추천서 제출 여부 정중하게 확인하는 follow-up 메일")
+
+    topic = "\n".join(topic_parts)
+    extra = (
+        "Common App / Coalition App 초대 링크를 이메일로 발송할 예정임을 언급하세요.\n"
+        "영문 CV, 성적표, 에세이 초안을 첨부로 제공할 수 있다고 명시하세요.\n"
+        f"이메일은 반드시 {lang_label}로 작성하세요."
+    )
+
+    req = EmailRequest(
+        email_type=etype,
+        to_address=professor_email or "",
+        topic=topic,
+        recipient_name=professor_name or "교수님",
+        extra_context=extra,
+    )
+    return build_email_user_message(req), req
+
+
 def stream_compose(req: EmailRequest) -> Iterator[str]:
     """이메일 초안 스트리밍 — UI에서 직접 사용"""
     etype = EMAIL_TYPES.get(req.email_type, EMAIL_TYPES["custom"])
@@ -561,6 +684,14 @@ def send_email(
     if not to_address or "@" not in to_address:
         return {"success": False, "error": f"유효하지 않은 수신 주소: {to_address}"}
 
+    # inquiry 안전장치: 기본적으로 .edu 수신자만 허용
+    if (email_type or "").lower() == "inquiry":
+        if not _is_valid_inquiry_recipient(to_address):
+            return {
+                "success": False,
+                "error": f"입학처 문의 메일은 .edu 주소만 허용됩니다: {to_address}",
+            }
+
     # 시간당 발송 제한
     recent = _count_recent_sends(hours=1)
     if recent >= MAX_SENDS_PER_HOUR:
@@ -586,7 +717,7 @@ def send_email(
 
     # 발송
     try:
-        with smtplib.SMTP(smtp_host, smtp_port, timeout=15) as server:
+        with smtplib.SMTP(smtp_host, smtp_port, timeout=SMTP_TIMEOUT_SEC) as server:
             server.starttls()
             server.login(smtp_user, smtp_pass)
             all_recipients = [to_address] + (cc or [])
@@ -609,6 +740,99 @@ def send_email(
         }
     except Exception as e:
         return {"success": False, "error": str(e)}
+
+
+def send_email_batch(email_items: list[dict], provider: str = "auto") -> list[dict]:
+    """다건 이메일을 SMTP 1회 연결로 발송해 지연을 줄인다.
+
+    email_items 항목 예시:
+      {
+        "to_address": "admissions@nyu.edu",
+        "subject": "...",
+        "body": "...",
+        "email_type": "inquiry",
+        "cc": ["..."]
+      }
+    """
+    if not email_items:
+        return []
+
+    try:
+        smtp_host, smtp_port, smtp_user, smtp_pass, sender_name, selected_provider = _get_smtp_config(provider)
+    except ValueError as e:
+        return [{"success": False, "error": str(e)} for _ in email_items]
+
+    recent = _count_recent_sends(hours=1)
+    remaining = max(0, MAX_SENDS_PER_HOUR - recent)
+    if remaining <= 0:
+        return [{
+            "success": False,
+            "error": f"시간당 발송 제한 초과 ({MAX_SENDS_PER_HOUR}통).",
+        } for _ in email_items]
+
+    results: list[dict] = []
+    sent_count = 0
+
+    try:
+        with smtplib.SMTP(smtp_host, smtp_port, timeout=SMTP_TIMEOUT_SEC) as server:
+            server.starttls()
+            server.login(smtp_user, smtp_pass)
+
+            for item in email_items:
+                if sent_count >= remaining:
+                    results.append({
+                        "success": False,
+                        "error": f"시간당 발송 제한 초과 ({MAX_SENDS_PER_HOUR}통).",
+                    })
+                    continue
+
+                to_address = (item.get("to_address") or "").strip()
+                subject = (item.get("subject") or "").strip()
+                body = item.get("body") or ""
+                email_type = (item.get("email_type") or "custom").strip().lower()
+                cc = item.get("cc") or []
+
+                if not to_address or "@" not in to_address:
+                    results.append({"success": False, "error": f"유효하지 않은 수신 주소: {to_address}"})
+                    continue
+                if email_type == "inquiry" and not _is_valid_inquiry_recipient(to_address):
+                    results.append({
+                        "success": False,
+                        "error": f"입학처 문의 메일은 .edu 주소만 허용됩니다: {to_address}",
+                    })
+                    continue
+
+                msg = MIMEMultipart("alternative")
+                msg["Subject"] = subject
+                msg["From"] = f"{sender_name} <{smtp_user}>" if sender_name else smtp_user
+                msg["To"] = to_address
+                if cc:
+                    msg["Cc"] = ", ".join(cc)
+                msg.attach(MIMEText(body, "plain", "utf-8"))
+
+                try:
+                    all_recipients = [to_address] + cc
+                    server.sendmail(smtp_user, all_recipients, msg.as_string())
+                    _log_sent(to_address, subject, email_type, body)
+                    sent_count += 1
+                    results.append({
+                        "success": True,
+                        "to": to_address,
+                        "subject": subject,
+                        "provider": selected_provider,
+                        "sent_at": datetime.now().isoformat(),
+                    })
+                except Exception as e:
+                    results.append({"success": False, "error": str(e)})
+    except smtplib.SMTPAuthenticationError:
+        return [{
+            "success": False,
+            "error": "SMTP 인증 실패. 계정/앱 비밀번호를 확인하세요.",
+        } for _ in email_items]
+    except Exception as e:
+        return [{"success": False, "error": str(e)} for _ in email_items]
+
+    return results
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 📬  수신함 조회
@@ -732,24 +956,41 @@ def _extract_deadline_hints(text: str) -> list[str]:
 
 
 def _score_email_importance(m: dict) -> tuple[int, list[str]]:
-    """중요도 점수와 근거 반환"""
+    """중요도 점수와 근거 반환. CRITICAL 키워드는 별도 가산점."""
     score = 0
     reasons = []
 
     sender = (m.get("from") or "").lower()
+    sender_addr = _extract_email_address(sender)
+    sender_domain = _email_domain(sender_addr)
     subject = (m.get("subject") or "").lower()
     body = (m.get("body_preview") or "").lower()
     combined = f"{subject} {body}"
 
-    if ".edu" in sender:
+    # 🚨 CRITICAL 키워드 — 서류/마감 관련: 즉시 +12점
+    CRITICAL_KEYWORDS = [
+        "missing document", "missing materials", "incomplete application",
+        "deadline", "due date", "by", "submit by", "required by",
+        "action required", "respond by", "verify", "confirm",
+        "official transcript", "financial aid", "scholarship",
+        "admit", "admitted", "offer of admission", "waitlist", "waitlisted",
+        "denied", "decision", "final decision",
+    ]
+    critical_hits = [kw for kw in CRITICAL_KEYWORDS if kw in combined]
+    if critical_hits:
+        score += 12
+        reasons.append(f"🚨CRITICAL: {', '.join(critical_hits[:3])}")
+
+    if sender_domain.endswith(".edu"):
         score += 5
         reasons.append(".edu 발신")
 
-    for kw in IMPORTANT_SENDER_KEYWORDS:
-        if kw in sender:
-            score += 2
-            reasons.append(f"발신자 키워드:{kw}")
-            break
+    if sender_domain.endswith(".edu"):
+        for kw in IMPORTANT_SENDER_KEYWORDS:
+            if kw in sender:
+                score += 2
+                reasons.append(f"발신자 키워드:{kw}")
+                break
 
     hit_count = 0
     for kw in IMPORTANT_SUBJECT_KEYWORDS:
@@ -782,20 +1023,22 @@ def summarize_important_inbox(n: int = 40, provider: str = "gmail") -> str:
     for m in messages:
         score, reasons = _score_email_importance(m)
         sender_l = (m.get("from") or "").lower()
+        sender_addr = _extract_email_address(sender_l)
+        sender_domain = _email_domain(sender_addr)
+        sender_allowed = _is_allowed_important_sender(sender_l)
         subject_l = (m.get("subject") or "").lower()
-        sender_related = (
-            ".edu" in sender_l
-            or "admission" in sender_l
-            or "university" in sender_l
-            or "college" in sender_l
-            or "transfer" in sender_l
-        )
+        sender_related = sender_allowed
         subject_related = any(k in subject_l for k in [
             "admission", "application", "transfer", "university", "college", "portal", "deadline", "decision"
         ])
 
-        # 컷오프 강화: 점수 6 이상 + (발신자/제목 중 하나는 대학 입학 맥락)
-        if score >= 6 and (sender_related or subject_related):
+        # 컷오프: 발신자 도메인 검증 우선(.edu 기본 강제)
+        if not sender_allowed:
+            continue
+
+        # 컷오프: CRITICAL 이메일은 점수 상관없이 포함, 일반은 6점 이상 + 대학 맥락
+        is_critical_email = any("CRITICAL" in r or "🚨" in r for r in reasons)
+        if is_critical_email or (score >= 6 and (sender_related or subject_related)):
             scored.append((score, reasons, m))
 
     if not scored:
@@ -804,7 +1047,13 @@ def summarize_important_inbox(n: int = 40, provider: str = "gmail") -> str:
             f"(provider={provider})"
         )
 
-    scored.sort(key=lambda x: x[0], reverse=True)
+    scored.sort(
+        key=lambda x: (
+            # CRITICAL 이메일 최상단, 그 다음 점수 순
+            0 if any("CRITICAL" in r or "🚨" in r for r in x[1]) else 1,
+            -x[0],
+        )
+    )
     top = scored[:12]
 
     lines = [
@@ -821,7 +1070,12 @@ def summarize_important_inbox(n: int = 40, provider: str = "gmail") -> str:
         deadlines = _extract_deadline_hints(f"{subj} {preview}")
         due_txt = f" | 📅 힌트: {', '.join(deadlines)}" if deadlines else ""
 
-        lines.append(f"[{idx}] ⭐ 중요도 {score} | {subj}")
+        # CRITICAL 이메일은 🚨로 강조
+        is_critical = any("CRITICAL" in r or "🚨" in r for r in reasons)
+        prefix = "🚨" if is_critical else "⭐"
+        urgency = " ← 즉시 확인" if is_critical else ""
+
+        lines.append(f"[{idx}] {prefix} 중요도 {score} | {subj}{urgency}")
         lines.append(f"    발신: {sender}")
         lines.append(f"    일시: {date}")
         lines.append(f"    근거: {', '.join(reasons)}{due_txt}")
@@ -829,11 +1083,11 @@ def summarize_important_inbox(n: int = 40, provider: str = "gmail") -> str:
             lines.append(f"    요약: {preview[:220]}...")
         lines.append("")
 
-        if any(k in (subj + " " + preview).lower() for k in ["missing", "required", "deadline", "due"]):
-            action_items.append(f"- {subj[:80]}: 요구사항/마감일 확인 필요")
+        if is_critical or any(k in (subj + " " + preview).lower() for k in ["missing", "required", "deadline", "due"]):
+            action_items.append(f"- 🚨 {subj[:80]}: {'즉시' if is_critical else '요구사항/마감일'} 확인 필요")
 
     if action_items:
-        lines.append("🧭 우선 확인할 액션")
+        lines.append("🧭 즉시 처리할 액션 (마감/서류/결과)")
         lines.extend(action_items[:8])
 
     return "\n".join(lines)

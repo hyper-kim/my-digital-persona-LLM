@@ -77,7 +77,7 @@ POPPLER_PATH = POPPLER_PATH if POPPLER_PATH else None
 LOG_FILE = os.getenv("LOG_FILE", os.path.join(PROJECT_DIR, "ingestion_log.txt"))
 DPI = int(os.getenv("DPI", "150"))
 
-VISION_MODEL = os.getenv("VISION_MODEL", "qwen3-vl:8b")
+VISION_MODEL = os.getenv("VISION_MODEL", "llava:7b")
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "base")
 EMBED_MODEL_NAME = os.getenv("EMBED_MODEL_NAME", "intfloat/multilingual-e5-large")
 # 병렬 처리 워커 수
@@ -96,10 +96,18 @@ BACKUP_ROOT = os.getenv("BACKUP_ROOT", os.path.join(PROJECT_DIR, "backups"))
 
 # ABBYY / GCP 추가 풀 / Drive API
 ABBYY_ENABLED     = os.getenv("ABBYY_ENABLED", "false").lower() == "true"
-MAX_GCP_WORKERS   = int(os.getenv("MAX_GCP_WORKERS",   "4"))
-MAX_COORD_WORKERS = int(os.getenv("MAX_COORD_WORKERS", "4"))
+MAX_GCP_WORKERS   = int(os.getenv("MAX_GCP_WORKERS",   "8"))
+MAX_COORD_WORKERS = int(os.getenv("MAX_COORD_WORKERS", str(max(8, MAX_GCP_WORKERS))))
 GOOGLE_SA_KEY_PATH = os.getenv("GOOGLE_SA_KEY_PATH", "")
 GDRIVE_MOUNT      = os.getenv("GDRIVE_MOUNT", r"G:\\")
+
+# 공격적 하이브리드 모드
+FORCE_VM_ALL_FILES = os.getenv("FORCE_VM_ALL_FILES", "true").lower() == "true"
+HYBRID_LOCAL_VM_RACE = os.getenv("HYBRID_LOCAL_VM_RACE", "true").lower() == "true"
+VM_ALL_FILES_TIMEOUT_SEC = int(os.getenv("VM_ALL_FILES_TIMEOUT_SEC", "420"))
+ABBYY_TIMEOUT_SEC = int(os.getenv("ABBYY_TIMEOUT_SEC", "90"))
+GCP_FUTURE_TIMEOUT_SEC = int(os.getenv("GCP_FUTURE_TIMEOUT_SEC", "300"))
+GCP_SSH_OCR_TIMEOUT_SEC = int(os.getenv("GCP_SSH_OCR_TIMEOUT_SEC", "300"))
 
 # pool 참조 (dispatch_cv_combined에서 동적으로 채움)
 _cpu_pool_ref:   List = [None]
@@ -130,7 +138,7 @@ local_client  = ollama.Client(host=LOCAL_OLLAMA_URL, timeout=httpx.Timeout(conne
 CLOUD_VM_IP     = os.getenv("CLOUD_VM_IP",     "35.211.58.231")
 CLOUD_VM_USER   = os.getenv("CLOUD_VM_USER",   "kjy")
 SSH_KEY_PATH    = os.getenv("SSH_KEY_PATH",    r"C:\Users\kjy\.ssh\gcp_key_fixed")
-USE_GCP_SSH_OCR = os.getenv("USE_GCP_SSH_OCR", "false").lower() == "true"
+USE_GCP_SSH_OCR = os.getenv("USE_GCP_SSH_OCR", "true").lower() == "true"
 
 # SKIP_LOCAL_OCR=true → 로컬 Ollama OCR을 건너뜀 (텍스트/HWP/오디오만, VM 연결 전 쾌속 모드)
 SKIP_LOCAL_OCR = os.getenv("SKIP_LOCAL_OCR", "false").lower() == "true"
@@ -257,17 +265,30 @@ if MAX_VISION_WORKERS > 0:
     _check_cloud_on_startup()
 
 # GPU 가속 설정
-device = "cuda" if torch.cuda.is_available() else "cpu"
-print(f"\n🚀 [시스템] {device.upper()} 가속 모드 가동 시작")
+# FORCE_CPU_EMBED=true → 임베딩만 CPU 강제 (CUDA 불안정 환경용, Whisper는 영향 없음)
+FORCE_CPU_EMBED = os.getenv("FORCE_CPU_EMBED", "false").lower() == "true"
+# Whisper는 항상 CUDA 사용 (FORCE_CPU_EMBED와 무관)
+whisper_device = "cuda" if torch.cuda.is_available() else "cpu"
+# 임베딩 디바이스만 FORCE_CPU_EMBED 적용
+embed_device = "cpu" if FORCE_CPU_EMBED else whisper_device
+device = embed_device  # 하위 호환성 유지
+print(f"\n🚀 [시스템] Whisper={whisper_device.upper()} / Embed={embed_device.upper()}" + (" (FORCE_CPU_EMBED=임베딩만)" if FORCE_CPU_EMBED else ""))
 
 # 엔진 로딩
 try:
     print("🧠 AI 엔진(Whisper, Embedding) 로딩 중...")
-    whisper_model = whisper.load_model(WHISPER_MODEL, device=device)
-    embed_model = HuggingFaceEmbedding(model_name=EMBED_MODEL_NAME, device=device)
+    whisper_model = whisper.load_model(WHISPER_MODEL, device=whisper_device)
+    embed_model = HuggingFaceEmbedding(model_name=EMBED_MODEL_NAME, device=embed_device)
 except Exception as e:
     print(f"❌ 엔진 로딩 실패: {e}")
     exit()
+
+# 임베딩 제외 디렉토리 (패키지 매니저 캐시/소스 등 학습 불필요 폴더)
+_EXCLUDED_DIRS = {
+    "vcpkg-master", "vcpkg", "node_modules", ".git", ".svn",
+    "__pycache__", ".venv", "venv", "site-packages",
+    "arduino-ide", ".gradle", ".idea", ".vs",
+}
 
 # Qdrant DB 초기화
 print("🗄️ Qdrant Vector DB 연결 중...")
@@ -372,7 +393,13 @@ def _vision_ocr_single_image(image, page_label, use_cloud=True):
     if _CLOUD_DOWN.is_set() and _LOCAL_OCR_DOWN.is_set():
         return ""
 
-    prompt = "이 이미지의 모든 한국어/영어 손필기, 수식, 도표, 코드를 완벽한 텍스트와 마크다운 수식으로 추출해. 다른 설명 없이 내용만 정확히 베껴 써."
+    prompt = ("이 이미지를 빠짐없이 분석해 다음을 모두 추출해라:\n"
+              "1. [텍스트] 손필기·인쇄 텍스트를 원문 그대로 전사\n"
+              "2. [수식] 모든 수학·물리·화학 수식을 반드시 LaTeX($$...$$)로 변환 — 분수/적분/시그마/벡터 포함\n"
+              "3. [그래프/플롯] 그래프가 있으면: 제목, x축·y축 레이블·범위, 각 곡선의 형태(증가/감소/극값) 및 주요 좌표 기술\n"
+              "4. [회로도/다이어그램] BJT·FET·다이오드·연산증폭기·커패시터·저항 등 부품명과 연결관계를 텍스트로 기술\n"
+              "5. [표] 마크다운 테이블로 변환\n"
+              "추가 설명·머리말 없이 내용만 출력.")
 
     # 회로차단기: 클라우드 연속 실패 → 로컬 직행
     if use_cloud and _CLOUD_DOWN.is_set():
@@ -389,7 +416,7 @@ def _vision_ocr_single_image(image, page_label, use_cloud=True):
             res = client_to_use.chat(
                 model=VISION_MODEL,
                 messages=[{'role': 'user', 'content': prompt, 'images': [img_path]}],
-                keep_alive=0,
+                keep_alive=-1,
                 options={"num_ctx": 4096, "temperature": 0},
             )
             if use_cloud:
@@ -407,7 +434,7 @@ def _vision_ocr_single_image(image, page_label, use_cloud=True):
                     res = local_client.chat(
                         model=VISION_MODEL,
                         messages=[{'role': 'user', 'content': prompt, 'images': [img_path]}],
-                        keep_alive=0,
+                        keep_alive=-1,
                         options={"num_ctx": 4096, "temperature": 0},
                     )
                     return f"\n\n--- {page_label} ---\n" + res['message']['content']
@@ -442,6 +469,8 @@ def is_pdf_page_text_based(page):
 def is_text_pdf(file_path):
     """PDF가 텍스트 기반인지 스캔본(CV 필요)인지 판단합니다."""
     if not PYMUPDF_AVAILABLE: return False
+    if not wait_for_gdrive_sync(file_path, timeout=120):
+        return False
     try:
         doc = fitz.open(file_path)
         text_len = sum(len(page.get_text("text")) for page in doc)
@@ -486,6 +515,8 @@ def extract_mixed_pdf(file_path):
     """혼합 PDF: 텍스트 페이지는 CPU, 스캔 페이지는 Cloud GPU OCR을 파일 내 페이지 단위 병렬 처리."""
     if not PYMUPDF_AVAILABLE:
         return task_vision_cloud_gpu(file_path, "pdf")
+    if not wait_for_gdrive_sync(file_path, timeout=120):
+        return _ocr_unavailable_stub(file_path, "PDF 로컬 동기화 타임아웃")
 
     merged_text   = {}
     scan_indices  = []
@@ -675,20 +706,63 @@ def is_gdrive_stub(file_path: str) -> bool:
 
 
 def wait_for_gdrive_sync(file_path: str, timeout: int = 180) -> bool:
-    """G: stub 파일이 로컬 다운로드 완료될 때까지 대기. 성공 True / 타임아웃 False."""
-    if not is_gdrive_stub(file_path):
-        return True
+    """G: stub 해제 + 파일 크기 안정화(0바이트 제외)까지 대기. 성공 True / 타임아웃 False."""
+    try:
+        is_gdrive_path = file_path.upper().startswith(GDRIVE_MOUNT.upper().rstrip("\\") + "\\")
+    except Exception:
+        is_gdrive_path = False
+
+    if not os.path.exists(file_path):
+        return False
+
     # 파일 열기 시도로 GDFS 다운로드 트리거
     try:
         with open(file_path, 'rb') as _f:
             _f.read(1)
     except Exception:
         pass
+
     deadline = time.time() + timeout
+    last_size = -1
+    stable_count = 0
+
     while time.time() < deadline:
-        if not is_gdrive_stub(file_path):
-            return True
-        time.sleep(5)
+        try:
+            if not os.path.isfile(file_path):
+                time.sleep(2)
+                continue
+
+            if is_gdrive_path and is_gdrive_stub(file_path):
+                stable_count = 0
+                time.sleep(2)
+                continue
+
+            size = os.path.getsize(file_path)
+            if size <= 0:
+                stable_count = 0
+                time.sleep(2)
+                continue
+
+            if size == last_size:
+                stable_count += 1
+            else:
+                last_size = size
+                stable_count = 1
+
+            # 크기가 연속으로 안정화되면 실제 읽기 가능 여부까지 확인
+            if stable_count >= 2:
+                try:
+                    with open(file_path, 'rb') as _f:
+                        _f.read(1)
+                    return True
+                except Exception:
+                    stable_count = 0
+        except Exception:
+            stable_count = 0
+
+        time.sleep(2)
+
+    logging.warning(f"[GDRIVE-SYNC] 타임아웃: {file_path}")
     return False
 
 
@@ -755,19 +829,28 @@ def task_text_cpu(file_path):
 def task_media_local_gpu(file_path):
     """[카테고리 2] 오디오/비디오 (로컬 RTX 4060 Whisper 전담). VRAM 부족 시 시스템 RAM 자동 폴백."""
     try:
-        result = whisper_model.transcribe(file_path, fp16=(device == "cuda"))["text"]
+        result = whisper_model.transcribe(file_path, fp16=(whisper_device == "cuda"))["text"]
         if not result or not result.strip():
             # 무음/비주얼 전용 파일 → 메타데이터 stub으로 인덱싱
             return _ocr_unavailable_stub(file_path, "Whisper 트랜스크립션 결과 없음 (무음/비디오 전용)")
         return result
     except RuntimeError as e:
-        if "out of memory" in str(e).lower() or "cuda" in str(e).lower():
+        e_str = str(e)
+        if "out of memory" in e_str.lower() or "cuda" in e_str.lower():
             logging.warning(f"[Whisper OOM→CPU RAM] {file_path}: {e}")
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-            # 시스템 RAM으로 폴백 (fp16=False → CPU 연산)
-            result = whisper_model.transcribe(file_path, fp16=False)["text"]
-            return result if result.strip() else _ocr_unavailable_stub(file_path, "Whisper OOM 폴백 후 결과 없음")
+            try:
+                result = whisper_model.transcribe(file_path, fp16=False)["text"]
+                return result if result.strip() else _ocr_unavailable_stub(file_path, "Whisper OOM 폴백 후 결과 없음")
+            except RuntimeError as e2:
+                if "reshape" in str(e2) or "key.size" in str(e2) or "0 elements" in str(e2):
+                    logging.warning(f"[Whisper 오디오없음] {file_path}: {e2}")
+                    return _ocr_unavailable_stub(file_path, "오디오 트랙 없음 또는 빈 오디오 (비디오 전용)")
+                raise
+        if "reshape" in e_str or "key.size" in e_str or "0 elements" in e_str:
+            logging.warning(f"[Whisper 오디오없음] {file_path}: {e}")
+            return _ocr_unavailable_stub(file_path, "오디오 트랙 없음 또는 빈 오디오 (비디오 전용)")
         raise
 
 def _ocr_unavailable_stub(file_path: str, note: str = "") -> str:
@@ -788,22 +871,220 @@ def _ocr_unavailable_stub(file_path: str, note: str = "") -> str:
         f"status=PENDING_OCR"
     )
 
+def _is_pending_ocr_text(text: str) -> bool:
+    if not text:
+        return True
+    t = str(text)
+    return t.startswith("[VISUAL_CONTENT_PENDING_OCR]") or "status=PENDING_OCR" in t
+
+def _merge_local_vm_text(local_text: str, vm_text: str) -> str:
+    """로컬/VM 동시 결과를 합치되 pending stub은 후순위로 둔다."""
+    local_text = local_text or ""
+    vm_text = vm_text or ""
+
+    local_ok = bool(local_text.strip()) and not _is_pending_ocr_text(local_text)
+    vm_ok = bool(vm_text.strip()) and not _is_pending_ocr_text(vm_text)
+
+    if local_ok and vm_ok:
+        if local_text.strip() == vm_text.strip():
+            return local_text
+        return (
+            "[LOCAL_EXTRACT]\n"
+            + local_text.strip()
+            + "\n\n[VM_OCR_SUPPLEMENT]\n"
+            + vm_text.strip()
+        )
+    if vm_ok:
+        return vm_text
+    if local_ok:
+        return local_text
+    return local_text if local_text.strip() else vm_text
+
+def _run_local_vm_race(file_path: str, ext: str, local_fn):
+    """로컬 추출과 VM OCR을 동시에 실행하고 결과를 병합한다."""
+    gcp_pool = _gcp_pool_ref[0]
+    vm_fut = None
+    ext_l = (ext or "").lower()
+
+    # 🔴 텍스트/코드 파일은 항상 CPU 단독 처리 (VM 해제) — 2026-03-31
+    vm_skip_text_exts = {
+        "txt", "md", "csv", "py", "json", "html", "xml", "log", "ini",
+        "yml", "yaml", "toml", "cfg", "conf", "bat", "ps1", "sh", "jsx",
+        "ts", "tsx", "js", "css", "scss", "less",
+        "c", "cpp", "cc", "cxx", "h", "hpp", "hxx", "h++",
+        "java", "go", "rs", "rb", "php", "bash", "pl", "scala", "kt", "swift", "lua", "r",
+        "sql", "gradle", "maven", "pom", "cmake", "make",
+        # Arduino/임베디드 코드
+        "ino", "pde",
+        # 네이버/크롬 임시 다운로드 파일
+        "다운로드", "crdownload", "part", "tmp", "temp",
+        # 바이너리/델타/캡처 파일 (이미지가 아님)
+        "cap", "dat", "sav", "mid", "midi", "bin", "dll", "exe", "so", "a",
+        "blend", "ppm", "pbm", "pgm",  # Blender/Netpbm binary
+        "class", "jar", "war", "ear",
+        "zip", "tar", "gz", "bz2", "7z", "rar",
+        "obj", "mtl", "fbx", "stl", "ply",  # 3D 모델
+        "db", "sqlite", "dbf",
+        "ds_store", "lnk", "url",
+        # GIS/지리정보 파일
+        "shp", "shx", "prj", "qgs", "qgz", "geojson", "kml", "kmz",
+        "gpx", "osm", "topojson",
+        # 음악/오디오
+        "mp3", "wav", "ogg", "flac", "aac", "m4a", "wma",
+        # 영상 (이미지 아님)
+        "mp4", "avi", "mkv", "mov", "wmv", "flv", "webm", "m4v",
+        # 설치 패키지/이미지 파일 (수 GB 바이너리)
+        "cab", "msi", "iso", "dmg", "pkg", "deb", "rpm", "appimage",
+    }
+    skip_vm = False
+    # 확장자 없는 파일 (게임 세이브, 바이너리 데이터) → VM OCR 불필요
+    _basename = os.path.basename(file_path)
+    if '.' not in _basename or len(ext_l) > 12:
+        skip_vm = True
+    elif ext_l in vm_skip_text_exts:
+        skip_vm = True  # 모든 텍스트/코드 파일 → CPU 단독 (크기 무관)
+
+    if (
+        FORCE_VM_ALL_FILES
+        and HYBRID_LOCAL_VM_RACE
+        and USE_GCP_SSH_OCR
+        and not _CLOUD_DOWN.is_set()
+        and gcp_pool is not None
+        and not skip_vm
+    ):
+        try:
+            vm_fut = gcp_pool.submit(task_vision_via_gcp_ssh, file_path, ext)
+        except Exception as e:
+            logging.error(f"[HYBRID] VM 제출 실패: {file_path} | {e}")
+
+    local_text = local_fn() or ""
+    vm_text = ""
+    if vm_fut is not None:
+        try:
+            vm_text = vm_fut.result(timeout=VM_ALL_FILES_TIMEOUT_SEC) or ""
+        except Exception as e:
+            logging.error(f"[HYBRID] VM 결과 수집 실패: {file_path} | {e}")
+
+    return _merge_local_vm_text(local_text, vm_text)
+
+
+def _gcp_video_frames_ocr(file_path: str, n_frames: int = 5) -> str:
+    """ffmpeg으로 비디오에서 균등 N프레임 추출 → GCP SSH OCR (qwen3-vl)."""
+    if not USE_GCP_SSH_OCR or _CLOUD_DOWN.is_set():
+        return ""
+    gcp_pool = _gcp_pool_ref[0]
+    if not gcp_pool:
+        return ""
+    tmp_dir = tempfile.mkdtemp(prefix="omni_vid_")
+    try:
+        probe = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+             "-of", "csv=p=0", file_path],
+            capture_output=True, text=True, timeout=15
+        )
+        try:
+            duration = float(probe.stdout.strip())
+        except ValueError:
+            duration = 60.0
+        frame_files = []
+        for i in range(n_frames):
+            t = duration * (i + 0.5) / n_frames
+            out = os.path.join(tmp_dir, f"f{i:02d}.jpg")
+            subprocess.run(
+                ["ffmpeg", "-ss", f"{t:.2f}", "-i", file_path,
+                 "-vframes", "1", "-q:v", "3", out, "-y"],
+                capture_output=True, timeout=20
+            )
+            if os.path.exists(out) and os.path.getsize(out) > 1024:
+                frame_files.append(out)
+        if not frame_files:
+            return ""
+        futs = [(i, gcp_pool.submit(task_vision_via_gcp_ssh, fp, "jpg"))
+                for i, fp in enumerate(frame_files)]
+        parts = []
+        for i, fut in futs:
+            try:
+                r = fut.result(timeout=120)
+                if r and "[VISUAL_CONTENT_PENDING" not in r:
+                    parts.append(f"[프레임{i+1}]\n{r.strip()}")
+            except Exception as ev:
+                logging.debug(f"[VIDEO-FRAME] 프레임{i+1} OCR 실패: {ev}")
+        return "\n\n".join(parts)
+    except Exception as e:
+        logging.error(f"[VIDEO-FRAME] 프레임 추출 실패: {file_path} | {e}")
+        return ""
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def _process_video_full(file_path: str) -> str:
+    """mp4/avi/mkv: Whisper(오디오) + ffmpeg 프레임 → GCP OCR(비주얼) 병행."""
+    audio = task_media_local_gpu(file_path)
+    frame_ocr = _gcp_video_frames_ocr(file_path)
+    if frame_ocr:
+        return audio.rstrip() + "\n\n[비디오 프레임 OCR]\n" + frame_ocr
+    return audio
+
 
 # ── GCP VM SSH 직접 OCR ─────────────────────────────────────────────────────────────────────────
 # USE_GCP_SSH_OCR=true 시: 스캔PDF/이미지를 GCP VM에 잠접 전송 → GCP에서 변환+OCR
 # 로컴 convert_from_path 없음 → RAM 절약 + G:드라이브 파일 한 번만 전송
 _GCP_OCR_PY_SRC = """\
 # -*- coding: utf-8 -*-
-import sys, os, tempfile, ollama
+import sys, os, tempfile, ollama, subprocess
 fp    = sys.argv[1]
 model = sys.argv[2]
 dpi   = int(sys.argv[3]) if len(sys.argv) > 3 else 150
 ext   = fp.rsplit('.', 1)[-1].lower()
-prompt = "\uc774 \uc774\ubbf8\uc9c0\uc758 \ubaa8\ub4e0 \ud55c\uad6d\uc5b4/\uc601\uc5b4 \uc190\ud544\uae30, \uc218\uc2dd, \ub3c4\ud45c, \ucf54\ub4dc\ub97c \uc644\ubcbd\ud55c \ud14d\uc2a4\ud2b8\uc640 \ub9c8\ud06c\ub2e4\uc6b4 \uc218\uc2dd\uc73c\ub85c \ucd94\ucd9c\ud574. \ub2e4\ub978 \uc124\uba85 \uc5c6\uc774 \ub0b4\uc6a9\ub9cc \uc815\ud655\ud788 \ubca0\uae38 \uc368."
+prompt = ("이 이미지를 빠짐없이 분석해 다음을 모두 추출해라:\n"
+          "1. [텍스트] 손필기·인쇄 텍스트를 원문 그대로 전사\n"
+          "2. [수식] 모든 수학·물리·화학 수식을 반드시 LaTeX($$...$$)로 변환 — 분수/적분/시그마/벡터 포함\n"
+          "3. [그래프/플롯] 그래프가 있으면: 제목, x축·y축 레이블·범위, 각 곡선의 형태(증가/감소/극값) 및 주요 좌표 기술\n"
+          "4. [회로도/다이어그램] BJT·FET·다이오드·연산증폭기·커패시터·저항 등 부품명과 연결관계를 텍스트로 기술\n"
+          "5. [표] 마크다운 테이블로 변환\n"
+          "추가 설명·머리말 없이 내용만 출력.")
 client  = ollama.Client()
+def _chat_full(client, model, messages):
+    buf_c = []
+    for chunk in client.chat(model=model, messages=messages,
+                              stream=True, keep_alive=-1,
+                              options={'num_ctx': 4096, 'temperature': 0}):
+        buf_c.append(getattr(chunk.message, 'content', '') or '')
+    return ''.join(buf_c)
+
+def _libreoffice_to_pdf(src_path):
+    # LibreOffice로 Office 파일(pptx/hwp/xlsx/docx 등)을 PDF로 변환. PDF 경로 반환.
+    out_dir = tempfile.mkdtemp(prefix='omni_lo_')
+    try:
+        subprocess.run(
+            ['libreoffice', '--headless', '--convert-to', 'pdf', src_path, '--outdir', out_dir],
+            timeout=180, check=True, capture_output=True
+        )
+    except Exception as e:
+        raise RuntimeError('LibreOffice 변환 실패: ' + str(e))
+    base = os.path.splitext(os.path.basename(src_path))[0] + '.pdf'
+    pdf_path = os.path.join(out_dir, base)
+    if not os.path.exists(pdf_path):
+        # libreoffice가 파일명을 바꿀 수 있음 — 첫 번째 PDF 사용
+        pdfs = [f for f in os.listdir(out_dir) if f.endswith('.pdf')]
+        if not pdfs:
+            raise RuntimeError('LibreOffice PDF 출력 없음: ' + out_dir)
+        pdf_path = os.path.join(out_dir, pdfs[0])
+    return pdf_path, out_dir
+
 results = []
 temps   = []
+lo_dir  = None
 try:
+    # Office 포맷 → LibreOffice로 PDF 변환 후 기존 PDF 경로로 처리
+    _OFFICE_EXTS = ('pptx', 'ppt', 'hwp', 'hwpx', 'xlsx', 'xls', 'docx', 'doc',
+                    'odp', 'ods', 'odt', 'pps', 'ppsx')
+    if ext in _OFFICE_EXTS:
+        converted_pdf, lo_dir = _libreoffice_to_pdf(fp)
+        temps.append(converted_pdf)
+        ext = 'pdf'
+        fp  = converted_pdf
+
     if ext == 'pdf':
         from pdf2image import convert_from_path
         imgs = convert_from_path(fp, dpi=dpi, thread_count=2)
@@ -812,19 +1093,17 @@ try:
             img.save(tf.name, 'JPEG', quality=80)
             temps.append(tf.name)
             tf.close()
-            r = client.chat(model=model,
-                            messages=[{'role': 'user', 'content': prompt, 'images': [tf.name]}],
-                            keep_alive=0, options={'num_ctx': 4096, 'temperature': 0})
-            results.append('--- Page ' + str(i + 1) + ' ---\\n' + r['message']['content'])
+            _txt = _chat_full(client, model, [{'role': 'user', 'content': prompt, 'images': [tf.name]}])
+            results.append('--- Page ' + str(i + 1) + ' ---\\n' + _txt)
     else:
-        r = client.chat(model=model,
-                        messages=[{'role': 'user', 'content': prompt, 'images': [fp]}],
-                        keep_alive=0, options={'num_ctx': 4096, 'temperature': 0})
-        results.append(r['message']['content'])
+        _txt = _chat_full(client, model, [{'role': 'user', 'content': prompt, 'images': [fp]}])
+        results.append(_txt)
 finally:
     for t in temps:
         if os.path.exists(t):
             os.unlink(t)
+    if lo_dir and os.path.isdir(lo_dir):
+        import shutil; shutil.rmtree(lo_dir, ignore_errors=True)
     if os.path.exists(fp):
         os.unlink(fp)
 print('\\n\\n'.join(results))
@@ -833,31 +1112,48 @@ print('\\n\\n'.join(results))
 
 def task_vision_via_gcp_ssh(file_path: str, ext: str) -> str:
     """파일을 GCP VM에 직접 전송 → GCP에서 PDF 변환+OCR → 결과 반환.
-    로컴 convert_from_path 호출 없음 — RAM/CPU 절약."""
+    로컴 convert_from_path 호출 없음 — RAM/CPU 절약.
+    SSH 연결 2번으로 최소화: SCP(파일 전송) + SSH(스크립트 파이프+실행 통합)."""
+    # Google Docs 파일 형식 → VM에서 이미지 OCR 불가, 不필요ㅈ
+    _GDOCS_SKIP_EXTS = frozenset(['gdoc', 'gslides', 'gsheet', 'gdrive', 'gform', 'gsite'])
+    if ext.lower() in _GDOCS_SKIP_EXTS:
+        return _ocr_unavailable_stub(file_path, "Google Docs 형식 — 텍스트 추출로 처리됨")
+
     pid_tag     = f"{os.getpid()}_{int(time.time())}"
     safe_name   = os.path.basename(file_path).replace(' ', '_').replace('(', '').replace(')', '')
     remote_file = f"/tmp/omni_{pid_tag}_{safe_name}"
-    remote_py   = f"/tmp/omni_ocr_{pid_tag}.py"
     ssh_opts    = ["-o", "StrictHostKeyChecking=no", "-o", "BatchMode=yes",
-                   "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=30"]
+                   "-o", "ConnectTimeout=15", "-o", "ServerAliveInterval=30"]
     ssh_base    = ["ssh", "-i", SSH_KEY_PATH] + ssh_opts + [f"{CLOUD_VM_USER}@{CLOUD_VM_IP}"]
     scp_base    = ["scp", "-i", SSH_KEY_PATH] + ssh_opts
+    _local_tmp  = None  # Google Drive 스트리밍 파일용 임시 복사본
     try:
-        # 1) 원본 파일 → GCP (G:드라이브에서 한 번만 다운로드 후 SCP)
+        # 1) 원본 파일 → GCP (SCP, 한 번만 연결)
+        # Google Drive 스트리밍 마운트 파일은 SCP 직접 읽기 불가 ("Operation not supported on socket")
+        # → 로컬 임시 파일로 shutil.copy2 후 SCP 전송
+        import shutil as _shutil, tempfile as _tempfile
+        try:
+            _fd, _local_tmp = _tempfile.mkstemp(suffix=f'.{ext}')
+            os.close(_fd)
+            _shutil.copy2(file_path, _local_tmp)
+            _scp_source = _local_tmp
+        except Exception as _copy_err:
+            logging.warning(f"[SCP-COPY] 임시 복사 실패({type(_copy_err).__name__}: {_copy_err}) → 원본 경로 사용: {os.path.basename(file_path)}")
+            if _local_tmp and os.path.exists(_local_tmp):
+                try: os.unlink(_local_tmp)
+                except Exception: pass
+            _local_tmp = None
+            _scp_source = file_path
         subprocess.check_call(
-            scp_base + [file_path, f"{CLOUD_VM_USER}@{CLOUD_VM_IP}:{remote_file}"],
-            timeout=180, stderr=subprocess.DEVNULL
+            scp_base + [_scp_source, f"{CLOUD_VM_USER}@{CLOUD_VM_IP}:{remote_file}"],
+            timeout=240, stderr=subprocess.DEVNULL
         )
-        # 2) OCR Python 스크립트 → GCP (base64 인코딩 → 특수문자 문제 없음)
+        # 2) OCR 스크립트를 base64로 인코딩 후 파이프해서 python3에 직접 실행 (SSH 1번만)
+        #    echo '...' | base64 -d | python3 - args  →  파일 생성 불필요
         b64 = _base64.b64encode(_GCP_OCR_PY_SRC.encode("utf-8")).decode("ascii")
-        subprocess.check_call(
-            ssh_base + [f"echo '{b64}' | base64 -d > {remote_py}"],
-            timeout=20, stderr=subprocess.DEVNULL
-        )
-        # 3) GCP에서 OCR 실행 (PDF 변환 + Ollama 모두 GCP에서)
         out = subprocess.check_output(
-            ssh_base + [f"python3 {remote_py} '{remote_file}' {VISION_MODEL} {DPI} 2>/dev/null"],
-            timeout=600, stderr=subprocess.DEVNULL
+            ssh_base + [f"echo '{b64}' | base64 -d | python3 - '{remote_file}' {VISION_MODEL} {DPI} 2>/dev/null"],
+            timeout=GCP_SSH_OCR_TIMEOUT_SEC, stderr=subprocess.DEVNULL
         ).decode("utf-8", errors="replace").strip()
         _cloud_ocr_success()
         return out if out else _ocr_unavailable_stub(file_path, "GCP OCR 결과 없음")
@@ -871,10 +1167,15 @@ def task_vision_via_gcp_ssh(file_path: str, ext: str) -> str:
         return _ocr_unavailable_stub(file_path, str(e)[:200])
     finally:
         try:
-            subprocess.run(ssh_base + [f"rm -f {remote_file} {remote_py}"],
-                           timeout=10, stderr=subprocess.DEVNULL)
+            subprocess.run(ssh_base + [f"rm -f {remote_file}"],
+                           timeout=15, stderr=subprocess.DEVNULL)
         except Exception:
             pass
+        if _local_tmp and os.path.exists(_local_tmp):
+            try:
+                os.unlink(_local_tmp)
+            except Exception:
+                pass
 
 
 # ─── GCP VM + Google Drive API 직접 OCR ──────────────────────────────────────
@@ -914,11 +1215,18 @@ except Exception as e:
     sys.exit(1)
 
 import ollama
+_CV_PROMPT = ("이 이미지를 빠짐없이 분석해 다음을 모두 추출해라:\\n"
+              "1. [텍스트] 손필기·인쇄 텍스트를 원문 그대로 전사\\n"
+              "2. [수식] 모든 수학·물리·화학 수식을 반드시 LaTeX($$...$$)로 변환 — 분수/적분/시그마/벡터 포함\\n"
+              "3. [그래프/플롯] 그래프가 있으면: 제목, x축·y축 레이블·범위, 각 곡선의 형태(증가/감소/극값) 및 주요 좌표 기술\\n"
+              "4. [회로도/다이어그램] BJT·FET·다이오드·연산증폭기·커패시터·저항 등 부품명과 연결관계를 텍스트로 기술\\n"
+              "5. [표] 마크다운 테이블로 변환\\n"
+              "추가 설명·머리말 없이 내용만 출력.")
 if abbyy_ctx:
     prompt = ("ABBYY 추출 텍스트:\\n" + abbyy_ctx[:3000] +
-              "\\n\\n위 내용을 참고하여 이 페이지에서 수식, 그래프, 손필기, 도표, 스캔 오류를 보완 추출해. 텍스트만 출력.")
+              "\\n\\n위 ABBYY 내용을 참고해 수식(LaTeX 변환 필수), 그래프, 손필기, 다이어그램을 보완해 완벽 완성하라. 텍스트만 출력.")
 else:
-    prompt = "\\uc774 \\uc774\\ubbf8\\uc9c0\\uc758 \\ubaa8\\ub4e0 \\ud55c\\uad6d\\uc5b4/\\uc601\\uc5b4 \\uc190\\ud544\\uae30, \\uc218\\uc2dd, \\ub3c4\\ud45c, \\ucf54\\ub4dc\\ub97c \\uc644\\ubcbd\\ud55c \\ud14d\\uc2a4\\ud2b8\\uc640 \\ub9c8\\ud06c\\ub2e4\\uc6b4 \\uc218\\uc2dd\\uc73c\\ub85c \\ucd94\\ucd9c\\ud574. \\ub2e4\\ub978 \\uc124\\uba85 \\uc5c6\\uc774 \\ub0b4\\uc6a9\\ub9cc \\uc815\\ud655\\ud788 \\ubca0\\uae38 \\uc368."
+    prompt = _CV_PROMPT
 
 client  = ollama.Client()
 results = []
@@ -934,12 +1242,12 @@ try:
             ptf.close()
             r = client.chat(model=model,
                             messages=[{"role": "user", "content": prompt, "images": [ptf.name]}],
-                            keep_alive=0, options={"num_ctx": 4096, "temperature": 0})
+                            keep_alive=-1, options={"num_ctx": 4096, "temperature": 0})
             results.append("--- Page " + str(i + 1) + " ---\\n" + r["message"]["content"])
     else:
         r = client.chat(model=model,
                         messages=[{"role": "user", "content": prompt, "images": [fp]}],
-                        keep_alive=0, options={"num_ctx": 4096, "temperature": 0})
+                        keep_alive=-1, options={"num_ctx": 4096, "temperature": 0})
         results.append(r["message"]["content"])
 finally:
     for t in temps:
@@ -1056,29 +1364,24 @@ def task_vision_via_gcp_ssh_drive(file_path: str, ext: str,
     abbyy_b64 = _base64.b64encode(abbyy_combined.encode("utf-8")).decode("ascii") if abbyy_combined else ""
 
     pid_tag   = f"{os.getpid()}_{int(time.time())}"
-    remote_py = f"/tmp/omni_drive_ocr_{pid_tag}.py"
     sa_remote = f"/tmp/omni_sa_{pid_tag}.json"
     ssh_opts  = ["-o", "StrictHostKeyChecking=no", "-o", "BatchMode=yes",
-                 "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=30"]
+                 "-o", "ConnectTimeout=15", "-o", "ServerAliveInterval=30"]
     ssh_base  = ["ssh", "-i", SSH_KEY_PATH] + ssh_opts + [f"{CLOUD_VM_USER}@{CLOUD_VM_IP}"]
     scp_base  = ["scp", "-i", SSH_KEY_PATH] + ssh_opts
     try:
-        # SA 키 → VM (OCR 완료 후 삭제)
+        # 1) SA 키 → VM (OCR 완료 후 삭제)
         subprocess.check_call(
             scp_base + [GOOGLE_SA_KEY_PATH, f"{CLOUD_VM_USER}@{CLOUD_VM_IP}:{sa_remote}"],
             timeout=30, stderr=subprocess.DEVNULL
         )
-        # 스크립트 → VM
+        # 2) 스크립트를 base64 파이프로 python3에 직접 실행 (파일 생성 불필요, SSH 1번)
         b64 = _base64.b64encode(_GCP_DRIVE_OCR_PY_SRC.encode("utf-8")).decode("ascii")
-        subprocess.check_call(
-            ssh_base + [f"echo '{b64}' | base64 -d > {remote_py}"],
-            timeout=20, stderr=subprocess.DEVNULL
-        )
         out = subprocess.check_output(
             ssh_base + [
-                f"python3 {remote_py} '{drive_file_id}' '{sa_remote}' {VISION_MODEL} {DPI} '{abbyy_b64}' 2>/dev/null"
+                f"echo '{b64}' | base64 -d | python3 - '{drive_file_id}' '{sa_remote}' {VISION_MODEL} {DPI} '{abbyy_b64}' 2>/dev/null"
             ],
-            timeout=600, stderr=subprocess.DEVNULL
+            timeout=GCP_SSH_OCR_TIMEOUT_SEC, stderr=subprocess.DEVNULL
         ).decode("utf-8", errors="replace").strip()
         _cloud_ocr_success()
         return out if out else _ocr_unavailable_stub(file_path, "Drive OCR 결과 없음")
@@ -1088,8 +1391,8 @@ def task_vision_via_gcp_ssh_drive(file_path: str, ext: str,
         return _ocr_unavailable_stub(file_path, str(e)[:200])
     finally:
         try:
-            subprocess.run(ssh_base + [f"rm -f {remote_py} {sa_remote}"],
-                           timeout=10, stderr=subprocess.DEVNULL)
+            subprocess.run(ssh_base + [f"rm -f {sa_remote}"],
+                           timeout=15, stderr=subprocess.DEVNULL)
         except Exception:
             pass
 
@@ -1099,6 +1402,9 @@ def task_vision_cloud_gpu(file_path: str, ext: str) -> str:
     # OCR 완전 비활성화 시 메타데이터 stub으로 인덱싱 (GCP VM 켜면 재처리)
     if _CLOUD_DOWN.is_set() and _LOCAL_OCR_DOWN.is_set():
         return _ocr_unavailable_stub(file_path, "GCP VM 연결 후 재처리 예정")
+
+    if not wait_for_gdrive_sync(file_path, timeout=120):
+        return _ocr_unavailable_stub(file_path, "파일 동기화 타임아웃")
 
     # GCP SSH 직접 처리 모드: 로컀 PDF 변환 없음 → RAM 절약
     if USE_GCP_SSH_OCR and not _CLOUD_DOWN.is_set():
@@ -1155,6 +1461,8 @@ def task_abbyy_ocr_pages(file_path: str) -> Dict[int, str]:
     실패 시 빈 dict 반환 (GCP SSH가 전담)."""
     if not ABBYY_ENABLED or not WIN32COM_AVAILABLE:
         return {}
+    if os.path.splitext(file_path)[1].lower() != ".pdf":
+        return {}
     try:
         import pythoncom
         pythoncom.CoInitialize()  # ThreadPoolExecutor 워커 스레드에서 COM STA 초기화 필수
@@ -1170,8 +1478,8 @@ def task_abbyy_ocr_pages(file_path: str) -> Dict[int, str]:
                 pages[i] = clean
         doc.Close(0)
         return pages
-    except Exception as e:
-        logging.error(f"[ABBYY] 실패: {file_path} | {e}")
+    except BaseException as e:
+        logging.error(f"[ABBYY] 실패: {file_path} | {e!r}")
         return {}
     finally:
         try:
@@ -1536,9 +1844,15 @@ def _dispatch_cv_chunked(
         enhanced_path = _make_enhanced_tempfile(chunk_path, "pdf")
         proc_path     = enhanced_path if enhanced_path else chunk_path
 
-        abbyy_fut = cpu_pool.submit(task_abbyy_ocr_pages, proc_path) if cpu_pool else None
+        abbyy_fut = (
+            cpu_pool.submit(task_abbyy_ocr_pages, proc_path)
+            if cpu_pool and proc_path.lower().endswith(".pdf") and not FORCE_VM_ALL_FILES
+            else None
+        )
         gcp_fut   = None
-        if USE_GCP_SSH_OCR and not _CLOUD_DOWN.is_set() and gcp_pool:
+        # 텍스트 PDF(삼성노트 내보내기 등)는 VM OCR 스킵 → 로컬 텍스트 추출로 처리
+        _chunk_is_text_pdf = is_text_pdf(proc_path)
+        if USE_GCP_SSH_OCR and not _CLOUD_DOWN.is_set() and gcp_pool and not _chunk_is_text_pdf:
             # 청크 파일은 실제 로컬 파일이므로 Drive 경로 불필요
             gcp_fut = gcp_pool.submit(task_vision_via_gcp_ssh, proc_path, "pdf")
 
@@ -1559,14 +1873,14 @@ def _dispatch_cv_chunked(
 
         if abbyy_fut is not None:
             try:
-                for k, v in abbyy_fut.result(timeout=300).items():
+                for k, v in abbyy_fut.result(timeout=ABBYY_TIMEOUT_SEC).items():
                     abbyy_pages[chunk_start + k] = v
             except Exception as e:
-                logging.error(f"[ABBYY-CHUNK] {file_path}[{chunk_start}] | {e}")
+                logging.error(f"[ABBYY-CHUNK] {file_path}[{chunk_start}] | {e!r}")
 
         if gcp_fut is not None:
             try:
-                gcp_raw = gcp_fut.result(timeout=600)
+                gcp_raw = gcp_fut.result(timeout=GCP_FUTURE_TIMEOUT_SEC)
                 gcp_pages.update(_parse_gcp_raw_to_pages(gcp_raw, chunk_start))
             except Exception as e:
                 logging.error(f"[GCP-CHUNK] {file_path}[{chunk_start}] | {e}")
@@ -1629,6 +1943,21 @@ def dispatch_cv_combined(file_path: str, ext: str,
     cpu_pool = _cpu_pool_ref[0]
     gcp_pool = _gcp_pool_ref[0]
 
+    # 로컬 파일 경로는 동기화/안정화 완료 후 로딩
+    if not is_stub and not wait_for_gdrive_sync(file_path, timeout=120):
+        fallback_text = _ocr_unavailable_stub(file_path, "파일 동기화 타임아웃")
+        meta = extract_doc_metadata(file_path, fallback_text, 0)
+        return [
+            PageNode(
+                page_idx=0,
+                total_pages=1,
+                element_type="mixed",
+                text=fallback_text,
+                parent_doc_id=abs_path,
+                **meta,
+            )
+        ]
+
     # PDF 페이지 수 확인 — PDF_CHUNK_PAGES 초과 시 청크 분할 처리
     if ext == "pdf" and PYMUPDF_AVAILABLE:
         try:
@@ -1647,11 +1976,17 @@ def dispatch_cv_combined(file_path: str, ext: str,
         logging.info(f"[ENHANCE] 필기 보정 적용: {os.path.basename(file_path)}")
 
     # ABBYY 작업 제출 (CPU) — 보정 파일 사용
-    abbyy_fut = cpu_pool.submit(task_abbyy_ocr_pages, _proc_path) if cpu_pool else None
+    abbyy_fut = (
+        cpu_pool.submit(task_abbyy_ocr_pages, _proc_path)
+        if cpu_pool and _proc_path.lower().endswith(".pdf") and not FORCE_VM_ALL_FILES
+        else None
+    )
 
     # GCP SSH 작업 제출 (GPU) — 보정 파일 사용
+    # 텍스트 기반 PDF(삼성노트 내보내기 등)는 VM OCR 불필요 → 스킵해서 GPU 낭비 방지
+    _is_text_pdf = (ext == "pdf" and is_text_pdf(_proc_path))
     gcp_fut = None
-    if USE_GCP_SSH_OCR and not _CLOUD_DOWN.is_set() and gcp_pool:
+    if USE_GCP_SSH_OCR and not _CLOUD_DOWN.is_set() and gcp_pool and not _is_text_pdf:
         if is_stub and GDRIVE_API_AVAILABLE and _get_drive_creds() is not None:
             gcp_fut = gcp_pool.submit(task_vision_via_gcp_ssh_drive, _proc_path, ext, None)
         else:
@@ -1661,15 +1996,15 @@ def dispatch_cv_combined(file_path: str, ext: str,
     abbyy_pages: Dict[int, str] = {}
     if abbyy_fut is not None:
         try:
-            abbyy_pages = abbyy_fut.result(timeout=300)
+            abbyy_pages = abbyy_fut.result(timeout=ABBYY_TIMEOUT_SEC)
         except Exception as e:
-            logging.error(f"[ABBYY-FUT] {file_path} | {e}")
+            logging.error(f"[ABBYY-FUT] {file_path} | {e!r}")
 
     # GCP 결과 수집
     gcp_raw = ""
     if gcp_fut is not None:
         try:
-            gcp_raw = gcp_fut.result(timeout=600)
+            gcp_raw = gcp_fut.result(timeout=GCP_FUTURE_TIMEOUT_SEC)
         except Exception as e:
             logging.error(f"[GCP-FUT] {file_path} | {e}")
 
@@ -1837,7 +2172,7 @@ def db_writer_worker(pbar):
                 for idx, chunk in enumerate(chunks)
             ]
 
-            # 임베딩: CUDA OOM 발생 시 캐시 비우고 CPU로 자동 폴백
+            # 임베딩: CUDA OOM/unknown error 발생 시 캐시 비우고 CPU로 자동 폴백
             _embed = embed_model
             for attempt in range(2):
                 try:
@@ -1845,13 +2180,17 @@ def db_writer_worker(pbar):
                         docs, storage_context=storage_context, embed_model=_embed
                     )
                     break
-                except RuntimeError as oom:
+                except Exception as oom:
                     oom_msg = str(oom).lower()
                     if ("out of memory" in oom_msg or "cuda" in oom_msg) and attempt == 0:
                         logging.error(f"[OOM 감지] {file_name} → CPU 폴백 시도")
                         pbar.write(f"🔁 OOM → CPU 폴백: {file_name}")
-                        if torch.cuda.is_available():
-                            torch.cuda.empty_cache()
+                        try:
+                            if torch.cuda.is_available():
+                                torch.cuda.empty_cache()
+                        except Exception:
+                            pass
+                        # 새 CPU embed 인스턴스 생성 (CUDA 컨텍스트 완전 분리)
                         _embed = HuggingFaceEmbedding(model_name=EMBED_MODEL_NAME, device="cpu")
                     else:
                         raise  # 2번째 시도도 실패하면 상위 except로
@@ -1887,7 +2226,12 @@ if __name__ == "__main__":
     print(f"\n📂 '{INPUT_ROOT}' 스캔 중... 잠시만 기다려주세요.")
     all_files = []
     for root, dirs, files in os.walk(INPUT_ROOT):
+        # 학습 불필요 디렉토리 제외 (in-place 수정으로 os.walk가 해당 하위 폴더 진입 안 함)
+        dirs[:] = [d for d in dirs if d not in _EXCLUDED_DIRS and not d.startswith('.')]
         for file in files:
+            # 바이너리 설치파일(.exe .msi .dmg .pkg) 제외
+            if os.path.splitext(file)[1].lower() in ('.exe', '.msi', '.dmg', '.pkg', '.deb', '.rpm'):
+                continue
             all_files.append(os.path.join(root, file))
 
     # 초고속 중복 데이터 로드
@@ -1895,8 +2239,51 @@ if __name__ == "__main__":
     existing_ids = set(row[0] for row in state_conn.execute("SELECT file_path FROM processed"))
 
     pending_files = [f for f in all_files if f not in existing_ids]
+
+    # ──────────────────────────────────────────────────────────────
+    # 🎯 VM GPU CV 우선순위 정렬
+    #   0순위: 실라버스 핵심 폴더의 PDF  (시험지/원노트 T/삼성노트 성T)
+    #   1순위: 기타 PDF (이미지 스캔 포함)
+    #   2순위: 나머지 파일
+    # ──────────────────────────────────────────────────────────────
+    _SYLLABUS_PRIORITY_KEYWORDS = [
+        '시험지', '원노트', 'OneNote', '삼성노트', 'SamsungNote',
+        'SCAN_2026', 'img2026', 'Untitled_2026',
+    ]
+    def _file_priority(fp: str) -> int:
+        """🔴 2026-03-31 동시처리 최적화: GPU(CV) 우선 → CPU(텍스트) 순로"""
+        norm = fp.replace('\\', '/')
+        ext = norm.rsplit('.', 1)[-1].lower()
+        
+        # tier 0: 실라버스 PDF (스캔/시험지) → GPU 최우선
+        if ext == 'pdf' and any(kw in norm for kw in _SYLLABUS_PRIORITY_KEYWORDS):
+            return 0
+        # tier 1: 일반 PDF → GPU 처리
+        if ext == 'pdf':
+            return 1
+        # tier 2: 이미지 + Office 포맷 → GPU 처리 (LibreOffice → PDF → llava OCR)
+        if ext in ('jpg', 'jpeg', 'png', 'bmp', 'webp', 'tiff',
+                   'pptx', 'ppt', 'pps', 'ppsx',
+                   'hwp', 'hwpx', 'hwp5',
+                   'xlsx', 'xls', 'docx', 'doc',
+                   'odp', 'ods', 'odt'):
+            return 2
+        # tier 3: 비디오 → 순차 처리 (비디오는 1개씩)
+        if ext in ('mp4', 'avi', 'mkv', 'mov', 'mp3', 'm4a', 'wav', 'flac'):
+            return 3
+        # tier 4: 텍스트/코드 → CPU 처리 (가장 늦게 제출)
+        return 4
+
+    pending_files.sort(key=_file_priority)
+
+    pri0 = sum(1 for f in pending_files if _file_priority(f) == 0)
+    pri1 = sum(1 for f in pending_files if _file_priority(f) == 1)
     print(f"🔍 총 {len(all_files)}개 파일 중, 신규 처리 대상: {len(pending_files)}개")
+    print(f"🎯 처리 순서: 실라버스PDF={pri0}건 → 기타PDF={pri1}건 → 기타={len(pending_files)-pri0-pri1}건")
     print(f"📊 로그 파일 위치: {LOG_FILE}\n")
+    if FORCE_VM_ALL_FILES:
+        print("🔥 FORCE_VM_ALL_FILES=true: 전 파일 VM GPU CV OCR + 로컬 추출 하이브리드 모드")
+        print(f"⚡ 병렬도: CPU={MAX_CPU_WORKERS}, GCP={MAX_GCP_WORKERS}(VM GPU), COORD={MAX_COORD_WORKERS}")
 
     pbar = tqdm(total=len(pending_files), desc="Omni-Brain 병렬 학습 진행률", unit="file", dynamic_ncols=True)
 
@@ -1934,14 +2321,24 @@ if __name__ == "__main__":
 
                 stub = is_gdrive_stub(file_path)
 
+                # 🔴 Office 포맷(pptx/hwp/xlsx 등)은 이미지/차트 포함 → GPU OCR 경로 별도 처리
+                _OFFICE_GPU_EXTS = {'pptx', 'ppt', 'hwp', 'hwpx', 'hwp5', 'xlsx', 'xls',
+                                    'docx', 'doc', 'pps', 'ppsx', 'odp', 'ods', 'odt'}
+
                 if ext in ['txt', 'md', 'csv', 'py', 'json', 'html', 'xml',
-                           'log', 'ini', 'docx', 'pptx', 'xlsx']:
+                           'log', 'ini',
+                           'c', 'cpp', 'cc', 'cxx', 'h', 'hpp', 'hxx', 'h++',
+                           'java', 'js', 'ts', 'tsx', 'jsx', 'go', 'rs', 'rb', 'php',
+                           'sh', 'bash', 'pl', 'scala', 'kt', 'swift', 'lua', 'r']:
                     # G: stub이면 Drive API 다운로드 → sync 대기 → 포기 순으로 폴백
                     if stub:
                         tmp = _download_stub_via_drive_api(file_path)
                         if tmp:
                             try:
-                                content = extract_google_timeline_text(tmp) if is_google_timeline_file(file_path, ext) else task_text_cpu(tmp)
+                                if is_google_timeline_file(file_path, ext):
+                                    content = _run_local_vm_race(tmp, ext, lambda: extract_google_timeline_text(tmp))
+                                else:
+                                    content = _run_local_vm_race(tmp, ext, lambda: task_text_cpu(tmp))
                             finally:
                                 try: os.unlink(tmp)
                                 except Exception: pass
@@ -1952,25 +2349,27 @@ if __name__ == "__main__":
                             stub = False
                     if not stub and content is None:
                         if is_google_timeline_file(file_path, ext):
-                            content = extract_google_timeline_text(file_path)
+                            content = _run_local_vm_race(file_path, ext, lambda: extract_google_timeline_text(file_path))
                         else:
-                            content = task_text_cpu(file_path)
+                            content = _run_local_vm_race(file_path, ext, lambda: task_text_cpu(file_path))
 
                 elif ext in ['m4a', 'mp3', 'mp4', 'wav', 'flac', 'avi', 'mkv']:
+                    _is_video = ext in ('mp4', 'avi', 'mkv', 'mov')
+                    _media_fn = _process_video_full if _is_video else task_media_local_gpu
                     if stub:
                         tmp = _download_stub_via_drive_api(file_path)
                         if tmp:
                             try:
-                                content = task_media_local_gpu(tmp)
+                                content = _media_fn(tmp)
                             finally:
                                 try: os.unlink(tmp)
                                 except Exception: pass
                         elif not wait_for_gdrive_sync(file_path, timeout=60):
                             content = _ocr_unavailable_stub(file_path, "G: 오디오 동기화 타임아웃 + Drive API 실패")
                         else:
-                            content = task_media_local_gpu(file_path)
+                            content = _media_fn(file_path)
                     else:
-                        content = task_media_local_gpu(file_path)
+                        content = _media_fn(file_path)
 
                 elif ext == 'pdf':
                     if stub:
@@ -1986,13 +2385,19 @@ if __name__ == "__main__":
                             nodes = dispatch_cv_combined(file_path, ext, is_stub=True)
                         result_queue.put((file_path, "PAGE_NODES", file_name, ext, nodes))
                         return
+                    elif FORCE_VM_ALL_FILES and USE_GCP_SSH_OCR and not _CLOUD_DOWN.is_set() and not is_text_pdf(file_path):
+                        # 🔴 2026-03-31: 스캔 PDF만 VM 처리 (텍스트 PDF는 CPU)
+                        nodes = dispatch_cv_combined(file_path, ext, is_stub=False)
+                        result_queue.put((file_path, "PAGE_NODES", file_name, ext, nodes))
+                        return
                     elif not is_text_pdf(file_path):
                         # 스캔 PDF (로컬 파일) → ABBYY + GCP 병렬
                         nodes = dispatch_cv_combined(file_path, ext, is_stub=False)
                         result_queue.put((file_path, "PAGE_NODES", file_name, ext, nodes))
                         return
                     else:
-                        content = task_text_cpu(file_path)
+                        # 🔴 텍스트 PDF + 기타 → CPU 단독
+                        content = _run_local_vm_race(file_path, ext, lambda: task_text_cpu(file_path))
 
                 elif ext in ['jpg', 'jpeg', 'png', 'bmp', 'webp', 'tiff']:
                     if stub:
@@ -2010,24 +2415,26 @@ if __name__ == "__main__":
                     result_queue.put((file_path, "PAGE_NODES", file_name, ext, nodes))
                     return
 
-                elif ext in ['hwp', 'hwpx']:
+                elif ext in _OFFICE_GPU_EXTS:
+                    # 🟢 Office 포맷 → VM LibreOffice→PDF 변환 후 llava OCR
+                    # (이미지 슬라이드, 차트, HWP 그림, 수식 모두 캡처)
                     if stub:
                         tmp = _download_stub_via_drive_api(file_path)
                         if tmp:
                             try:
-                                content = task_hwp_cpu(tmp)
+                                nodes = dispatch_cv_combined(tmp, ext, is_stub=False, doc_id_override=file_path)
                             finally:
                                 try: os.unlink(tmp)
                                 except Exception: pass
-                        elif not wait_for_gdrive_sync(file_path, timeout=60):
-                            content = _ocr_unavailable_stub(file_path, "G: HWP 동기화 타임아웃 + Drive API 실패")
                         else:
-                            content = task_hwp_cpu(file_path)
+                            nodes = dispatch_cv_combined(file_path, ext, is_stub=True)
                     else:
-                        content = task_hwp_cpu(file_path)
+                        nodes = dispatch_cv_combined(file_path, ext, is_stub=False)
+                    result_queue.put((file_path, "PAGE_NODES", file_name, ext, nodes))
+                    return
 
                 else:
-                    content = task_any_fallback(file_path)
+                    content = _run_local_vm_race(file_path, ext, lambda: task_any_fallback(file_path))
 
                 if not content or not content.strip():
                     logging.error(f"[EMPTY] 추출 결과 없음: {file_path}")
@@ -2040,27 +2447,39 @@ if __name__ == "__main__":
             result_queue.put((file_path, content, file_name, ext))
 
         # 작업 쏟아붓기 (Non-blocking)
+        # 🔴 2026-03-31: GPU 파일과 CPU 파일을 분리해서 동시 제출
+        gpu_files = [f for f in pending_files if _file_priority(f) <= 2]  # PDF, 이미지, Office
+        cpu_files = [f for f in pending_files if _file_priority(f) == 4]  # 텍스트/코드
+        video_files = [f for f in pending_files if _file_priority(f) == 3]  # 비디오
+        
+        print(f"🚀 동시처리 분류: GPU={len(gpu_files)}건(PDF+이미지+Office), CPU={len(cpu_files)}건, VIDEO={len(video_files)}건")
+        
         futures = []
-        for file_path in pending_files:
+        
+        # 1️⃣ GPU 파일들 먼저 쏟아붓기 (coord_pool 또는 gcp_pool)
+        for file_path in gpu_files:
             ext = file_path.lower().split('.')[-1]
-            stub = is_gdrive_stub(file_path)
-            if ext in ['m4a', 'mp3', 'mp4', 'wav', 'flac', 'avi', 'mkv']:
-                futures.append(audio_pool.submit(dispatch_and_queue, file_path))
-            elif ext in ['jpg', 'jpeg', 'png', 'bmp', 'webp', 'tiff']:
-                # CV 파일 → coord_pool (내부에서 cpu_pool + gcp_pool 동시 submit)
+            if FORCE_VM_ALL_FILES and USE_GCP_SSH_OCR:
+                futures.append(coord_pool.submit(dispatch_and_queue, file_path))
+            elif ext in ['jpg', 'jpeg', 'png', 'bmp', 'webp', 'tiff',
+                         'pptx', 'ppt', 'pps', 'ppsx',
+                         'hwp', 'hwpx', 'hwp5',
+                         'xlsx', 'xls', 'docx', 'doc',
+                         'odp', 'ods', 'odt']:
                 futures.append(coord_pool.submit(dispatch_and_queue, file_path))
             elif ext == 'pdf':
-                if stub:
-                    futures.append(coord_pool.submit(dispatch_and_queue, file_path))
-                else:
-                    futures.append(cpu_pool.submit(dispatch_and_queue, file_path))
-            elif ext in ['hwp', 'hwpx']:
-                futures.append(cpu_pool.submit(dispatch_and_queue, file_path))
-            else:
-                futures.append(cpu_pool.submit(dispatch_and_queue, file_path))
+                futures.append(coord_pool.submit(dispatch_and_queue, file_path))
+        
+        # 2️⃣ CPU 파일들 병렬로 제출 (cpu_pool 직접 사용)
+        for file_path in cpu_files:
+            futures.append(cpu_pool.submit(dispatch_and_queue, file_path))
+        
+        # 3️⃣ 비디오 파일들 (audio_pool, 1개 worker)
+        for file_path in video_files:
+            futures.append(audio_pool.submit(dispatch_and_queue, file_path))
 
-    # 모든 작업이 큐에 들어가고 처리 완료될 때까지 대기
-    result_queue.join()
+        # 모든 작업이 큐에 들어가고 처리 완료될 때까지 대기
+        result_queue.join()
     
     # DB 기록 쓰레드에 종료 시그널 전송
     result_queue.put(None)

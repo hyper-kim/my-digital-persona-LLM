@@ -1,0 +1,124 @@
+{
+  "source_url": "https://connect.nyu.edu/portal/undergraduate/tab=welcome",
+  "title": "Login",
+  "pages": [
+    {
+      "title": "Login",
+      "url": "https://connect.nyu.edu/account/login?r=https%3a%2f%2fconnect.nyu.edu%2fportal%2fundergraduate%2ftab%3dwelcome&cookie=1",
+      "tables": [
+        {
+          "title": "Login",
+          "rows": [
+            [
+              "Email AddressPasswordForgot Your Password?Login",
+              "Email Address",
+              "",
+              "Password",
+              "Forgot Your Password?",
+              ""
+            ],
+            [
+              "Email Address",
+              ""
+            ],
+            [
+              "Password",
+              "Forgot Your Password?"
+            ]
+          ]
+        },
+        {
+          "title": "Login",
+          "rows": [
+            [
+              "Email Address",
+              ""
+            ],
+            [
+              "Password",
+              "Forgot Your Password?"
+            ]
+          ]
+        }
+      ],
+      "list_items": [
+        "University Life",
+        "Information For:",
+        "Undergraduate Admissions",
+        "Copyright & Fair Use",
+        "Accessibility",
+        "University Life",
+        "New York University"
+      ],
+      "paragraphs": [
+        "Please navigate to theundergraduate admissions application status pageto log in to the correct status page with your NYU credentials.If you have any questions, please emailadmissions.ops@nyu.edu.",
+        "Students applying to various NYU non-degree programs may log in below to continue their application. You may start a new application via a link accessible on the specific non-degree program's website. Additional information about applying is on our websites forvisiting student programsandhigh school and middle school student programs.If you have any questions, please emailuniversity.programs@nyu.edu.",
+        "To log in, please enter your email address and password.",
+        "By sharing your information, you understand that we may send you additional information, from which you may unsubscribe at any time. You may view NYU'sDigital Privacy Statementand, for people in the EU, seeinformation on your rights under GDPR."
+      ],
+      "text_length": 1836
+    },
+    {
+      "title": "사용자 계정 로그인",
+      "url": "https://login.microsoftonline.com/665be5ef-3fc6-401b-b6c4-401a9d9c7b72/saml2?SAMLRequest=fVLLbtswEPwVgXeJEm1JJmE5cGMUNZA2RqT00EtB0quYAB8uSaXN35d%2BFeklNwKcmd2Z2eXdH6OzV%2FBBOduhqihRBla6vbIvHXoePucLdLdaBm40ObL1FA%2F2CX5NEGKWiDawy0%2BHJm%2BZ40EFZrmBwKJk%2FfrrAyNFyY7eRSedRtk6BPAxjbp3NkwGfA%2F%2BVUl4fnro0CHGY2AYh4MSwmmIh8K%2BTQXsJ6z2R5xURqUBn5fAJ3GCd4%2F9gPv%2BEWWbtJKyPJ5t3JS0e1G2MEp6F9wYndXKQiGdwU1TC6hhzGejbPJ5WYlcNHJ%2BenG6p7IVLcFnbyjbbjr0k7aEzhJrbBKAiPmC1HXd1uN8XFRU1DzBQphga0PkNnaIlKTJy1lO6FBRVreMLApKqx8o213T%2BKTsJeWPohMXUGBfhmGXn%2Byi7PutrQRA127Yebp%2FX8rHwvzWBFqdYIZLYCoVb4yz7Br7Er%2FX%2FncF35LYdrNzWsm3bK21%2B33vgUfoUPQTILy68v6%2Fl9Vf&RelayState=e1s1&sso_reload=true",
+      "tables": [],
+      "list_items": [],
+      "paragraphs": [
+        "ATTENTION:Do not use your personal email.",
+        "Sign in with your NetID followed by @nyu.edu (NetID@nyu.edu), then your NYU password.Need Help?",
+        "Review troubleshooting tips, includinghow to trust this is the real NYU Login.",
+        "By logging in, you agree to abide by thePolicy on Responsible Use of NYU Computers and Data.",
+        "When using a public or shared computer, quitting your browser does not securely log you out.You must sign or log out of your NYU account."
+      ],
+      "text_length": 525
+    }
+  ],
+  "tables": [
+    {
+      "title": "Login",
+      "rows": [
+        [
+          "Email AddressPasswordForgot Your Password?Login",
+          "Email Address",
+          "",
+          "Password",
+          "Forgot Your Password?",
+          ""
+        ],
+        [
+          "Email Address",
+          ""
+        ],
+        [
+          "Password",
+          "Forgot Your Password?"
+        ]
+      ]
+    },
+    {
+      "title": "Login",
+      "rows": [
+        [
+          "Email Address",
+          ""
+        ],
+        [
+          "Password",
+          "Forgot Your Password?"
+        ]
+      ]
+    }
+  ],
+  "links": [
+    "https://connect.nyu.edu/manage/login?realm=&r=/portal/undergraduate"
+  ],
+  "transfer_info": {
+    "total_pages": 2,
+    "total_tables": 2,
+    "total_links_visited": 1,
+    "data_sources": [
+      "Login",
+      "사용자 계정 로그인"
+    ]
+  }
+}

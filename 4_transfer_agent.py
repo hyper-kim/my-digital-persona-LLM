@@ -67,7 +67,10 @@ USER_PROFILE: dict[str, str] = {
     "credits":    os.getenv("USER_CREDITS",  "~60 credits (1+ year completed)"),
 }
 
-APPLIED_UNIVERSITIES = {"cornell", "stanford", "nyu", "upenn"}  # 이미 지원 완료
+APPLIED_UNIVERSITIES = {
+    "cornell", "stanford", "nyu", "upenn",
+    "uiuc", "purdue", "uchicago", "northwestern",
+}  # 지원 완료 / 지원 예정
 TOP_PRIORITY = "cornell"
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -82,6 +85,9 @@ UNIVERSITY_REGISTRY: dict[str, dict] = {
             "https://admissions.cornell.edu/apply/transfer-applicants",
             "https://admissions.cornell.edu/apply/transfer-applicants/checklist",
         ],
+        "portals": [
+            {"url": "https://apply.cornell.edu/apply/", "use_chrome": True, "click_button": "Sign In"},
+        ],
         "keywords": ["cornell", "ivy"],
     },
     "stanford": {
@@ -90,6 +96,9 @@ UNIVERSITY_REGISTRY: dict[str, dict] = {
         "urls": [
             "https://admission.stanford.edu/apply/transfer/",
             "https://admission.stanford.edu/apply/transfer/faq.html",
+        ],
+        "portals": [
+            {"url": "https://commonapp.org/apply", "use_chrome": True, "click_button": "Sign in"},
         ],
         "keywords": ["stanford"],
     },
@@ -101,6 +110,9 @@ UNIVERSITY_REGISTRY: dict[str, dict] = {
             "https://www.nyu.edu/admissions/undergraduate-admissions/how-to-apply/transfer/"
             "international-transfer-students.html",
         ],
+        "portals": [
+            {"url": "https://connect.nyu.edu/manage/login?realm=&r=/portal/undergraduate", "use_chrome": True, "click_button": "Login"},
+        ],
         "keywords": ["nyu", "new york university"],
     },
     "upenn": {
@@ -108,6 +120,9 @@ UNIVERSITY_REGISTRY: dict[str, dict] = {
         "priority": True,
         "urls": [
             "https://admissions.upenn.edu/admissions-and-financial-aid/transfer-applicants",
+        ],
+        "portals": [
+            {"url": "https://apply.commonapp.org/apply", "use_chrome": True, "click_button": "Sign in"},
         ],
         "keywords": ["upenn", "penn", "university of pennsylvania"],
     },
@@ -118,6 +133,9 @@ UNIVERSITY_REGISTRY: dict[str, dict] = {
             "https://admission.gatech.edu/transfer/",
             "https://admission.gatech.edu/transfer/international-transfer",
         ],
+        "portals": [
+            {"url": "https://admission.gatech.edu/apply", "use_chrome": True, "click_button": "Apply"},
+        ],
         "keywords": ["georgia tech", "gatech", "gt"],
     },
     "umich": {
@@ -126,21 +144,32 @@ UNIVERSITY_REGISTRY: dict[str, dict] = {
         "urls": [
             "https://admissions.umich.edu/apply/transfer",
         ],
+        "portals": [
+            {"url": "https://apply.umich.edu/", "use_chrome": True, "click_button": "Log in"},
+        ],
         "keywords": ["umich", "michigan", "university of michigan"],
     },
     "uiuc": {
         "name":     "University of Illinois Urbana-Champaign (UIUC)",
-        "priority": False,
+        "priority": True,
         "urls": [
-            "https://admissions.illinois.edu/apply/transfer",
+            "https://admissions.illinois.edu/Apply/Transfer",
+            "https://admissions.illinois.edu/Requirements/Transfer",
+            "https://cs.illinois.edu/admissions/transfer/transfer-applicants",
         ],
-        "keywords": ["uiuc", "illinois", "urbana"],
+        "portals": [
+            {"url": "https://myillini.illinois.edu/", "use_chrome": True, "click_button": "Login"},
+        ],
+        "keywords": ["uiuc", "illinois", "urbana", "일리노이", "어바나"],
     },
     "ucsd": {
         "name":     "UC San Diego (UCSD)",
         "priority": False,
         "urls": [
             "https://admissions.ucsd.edu/transfer/index.html",
+        ],
+        "portals": [
+            {"url": "https://apply.universityofcalifornia.edu/", "use_chrome": True, "click_button": "Log in"},
         ],
         "keywords": ["ucsd", "uc san diego", "san diego"],
     },
@@ -150,6 +179,9 @@ UNIVERSITY_REGISTRY: dict[str, dict] = {
         "urls": [
             "https://admission.usc.edu/transfer/",
         ],
+        "portals": [
+            {"url": "https://apply.usc.edu/", "use_chrome": True, "click_button": "Sign In"},
+        ],
         "keywords": ["usc", "southern california"],
     },
     "bu": {
@@ -157,6 +189,9 @@ UNIVERSITY_REGISTRY: dict[str, dict] = {
         "priority": False,
         "urls": [
             "https://www.bu.edu/admissions/apply/transfer/",
+        ],
+        "portals": [
+            {"url": "https://apply.commonapp.org/apply", "use_chrome": True, "click_button": "Sign in"},
         ],
         "keywords": ["bu", "boston university"],
     },
@@ -166,15 +201,49 @@ UNIVERSITY_REGISTRY: dict[str, dict] = {
         "urls": [
             "https://admissions.northeastern.edu/apply/transfer-students/",
         ],
+        "portals": [
+            {"url": "https://apply.northeastern.edu/", "use_chrome": True, "click_button": "Sign in"},
+        ],
         "keywords": ["northeastern"],
     },
     "purdue": {
         "name":     "Purdue University",
-        "priority": False,
+        "priority": True,
         "urls": [
             "https://www.admissions.purdue.edu/transfer/index.php",
+            "https://www.admissions.purdue.edu/transfer/international-transfer-students.php",
+            "https://www.admissions.purdue.edu/transfer/transfer-faq.php",
         ],
-        "keywords": ["purdue"],
+        "portals": [
+            {"url": "https://admissions.purdue.edu/apply/transfer/", "use_chrome": True, "click_button": "Apply"},
+        ],
+        "keywords": ["purdue", "퍼듀"],
+    },
+    "uchicago": {
+        "name":     "University of Chicago (UChicago)",
+        "priority": True,
+        "urls": [
+            "https://collegeadmissions.uchicago.edu/apply/transfer-students",
+            "https://collegeadmissions.uchicago.edu/apply",
+            "https://collegeadmissions.uchicago.edu/apply/requirements",
+        ],
+        "portals": [
+            {"url": "https://applyingtomaroon.uchicago.edu/", "use_chrome": True, "click_button": "Transfer"},
+        ],
+        "keywords": ["uchicago", "university of chicago", "시카고", "유시카고"],
+    },
+    "northwestern": {
+        "name":     "Northwestern University",
+        "priority": True,
+        "urls": [
+            "https://admissions.northwestern.edu/apply/identities/transfer.html",
+            "https://admissions.northwestern.edu/faqs/transferring-to-northwestern/index.html",
+            "https://admissions.northwestern.edu/apply/requirements/index.html",
+        ],
+        "portals": [
+            {"url": "https://apply.northwestern.edu/", "use_chrome": True, "click_button": "Transfer"},
+        ],
+        "keywords": ["northwestern", "노스웨스턴"],
     },
 }
 
@@ -237,13 +306,424 @@ def fetch_url(url: str, timeout: float = WEB_TIMEOUT_SEC) -> tuple[str, str]:
         return "", url
 
 
+def _get_chrome_major() -> int | None:
+    """Windows Chrome 설치 경로에서 major version 번호를 반환한다."""
+    import os as _os, re as _re
+    for base in [
+        r"C:\Program Files\Google\Chrome\Application",
+        r"C:\Program Files (x86)\Google\Chrome\Application",
+    ]:
+        if _os.path.isdir(base):
+            for d in _os.listdir(base):
+                if _re.match(r"^\d+\.\d+\.\d+\.\d+$", d):
+                    return int(d.split(".")[0])
+    return None
+
+
+def _get_chrome_binary_path() -> str:
+    """정식 Chrome 실행 파일 경로를 반환한다."""
+    import os
+    candidates = [
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+    ]
+    for p in candidates:
+        if os.path.isfile(p):
+            return p
+    return ""
+
+
+_CF_BLOCK_SIGNALS = (
+    "Human Verification", "CAPTCHA", "Attention Required",
+    "Just a moment", "cf-browser-verification",
+)
+
+
+def _is_cloudflare_blocked(title: str, text: str) -> bool:
+    joined = title + " " + text[:500]
+    return any(s.lower() in joined.lower() for s in _CF_BLOCK_SIGNALS)
+
+
+_LOGIN_LABELS = ("sign in", "log in", "login", "apply now", "apply", "create account", "get started")
+
+
+def _extract_page_text_4(driver) -> str:
+    """현재 페이지 전체 텍스트 추출(script/style/nav 제거)"""
+    soup = BeautifulSoup(driver.page_source, "lxml")
+    for tag in soup(["script", "style", "nav", "footer", "header", "aside", "iframe"]):
+        tag.decompose()
+    area = (
+        soup.find("main")
+        or soup.find(id=re.compile(r"(main|content|primary)", re.I))
+        or soup.find("article")
+        or soup.body
+        or soup
+    )
+    text = area.get_text(separator="\n", strip=True)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    return text.strip()[:_MAX_PAGE_CHARS]
+
+
+def _click_labels_4(driver, labels, wait_sec: int = 2) -> None:
+    """레이블 리스트 순서대로 첫 번째 클릭 가능한 버튼/링크를 클릭"""
+    import time as _t2
+    from selenium.webdriver.common.by import By
+    _t2.sleep(wait_sec)
+    for label in labels:
+        try:
+            xpath = (
+                "//*[contains(translate(normalize-space(text()),"
+                "'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),"
+                + repr(label) + ")]"
+            )
+            for el in driver.find_elements(By.XPATH, xpath):
+                if el.is_displayed() and el.tag_name in ("a", "button", "input"):
+                    el.click()
+                    _t2.sleep(2)
+                    return
+        except Exception:
+            continue
+
+
+def _fetch_visible_chrome_4(
+    url: str,
+    click_button: str | None = None,
+    timeout: int = 35,
+    manual_wait_sec: int = 25,
+) -> str:
+    """실제 Chrome 창(headless=False)으로 수동 로그인/클릭 유도.
+    우선순위:
+      1) 정식 Chrome(Program Files) + 기존 사용자 프로필 + 주소창 입력
+      2) undetected_chromedriver visible
+    """
+    import os, time as _t3
+
+    def _chrome_binary_path() -> str:
+        candidates = [
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        ]
+        for p in candidates:
+            if os.path.isfile(p):
+                return p
+        return ""
+
+    def _navigate_via_omnibox(driver_obj, target_url: str) -> None:
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.common.keys import Keys
+        try:
+            body = driver_obj.find_element(By.TAG_NAME, "body")
+            body.send_keys(Keys.CONTROL, "l")
+            body.send_keys(target_url)
+            body.send_keys(Keys.ENTER)
+        except Exception:
+            driver_obj.get(target_url)
+
+    user_data = os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\User Data")
+
+    # 1) 정식 Chrome + Selenium visible (사용자 요구사항 우선)
+    try:
+        from selenium import webdriver
+        from selenium.webdriver.chrome.options import Options
+        from selenium.webdriver.chrome.service import Service
+        from webdriver_manager.chrome import ChromeDriverManager
+
+        chrome_bin = _chrome_binary_path()
+        for use_profile in (True, False):
+            driver = None
+            try:
+                opts_std = Options()
+                opts_std.add_argument("--no-sandbox")
+                opts_std.add_argument("--disable-dev-shm-usage")
+                opts_std.add_argument("--window-size=1280,900")
+                if chrome_bin:
+                    opts_std.binary_location = chrome_bin
+                if use_profile and os.path.isdir(user_data):
+                    opts_std.add_argument(f"--user-data-dir={user_data}")
+                    opts_std.add_argument("--profile-directory=Default")
+
+                driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=opts_std)
+                driver.set_page_load_timeout(timeout)
+                driver.get("about:blank")
+                _navigate_via_omnibox(driver, url)
+                _t3.sleep(3)
+
+                labels = list(_LOGIN_LABELS)
+                if click_button and click_button.lower() not in labels:
+                    labels.insert(0, click_button.lower())
+                _click_labels_4(driver, labels, wait_sec=0)
+
+                if manual_wait_sec > 0:
+                    logging.info("[CHROME-VIS-STD] 물리적 클릭/로그인 대기 %ss: %s", manual_wait_sec, url)
+                    _t3.sleep(manual_wait_sec)
+
+                text = _extract_page_text_4(driver)
+                if len(text.strip()) > 100:
+                    logging.info("[CHROME-VIS-STD] %s 성공 (%d chars, profile=%s)", url, len(text), use_profile)
+                    return text
+            except Exception as e:
+                if use_profile:
+                    logging.debug("[CHROME-VIS-STD] 프로파일 오류(%s) — 임시 프로파일 재시도", e)
+                    continue
+                logging.warning("[CHROME-VIS-STD] %s 오류: %s", url, e)
+            finally:
+                if driver:
+                    try:
+                        driver.quit()
+                    except Exception:
+                        pass
+    except Exception as e:
+        logging.warning("[CHROME-VIS-STD] 초기화 오류: %s", e)
+
+    # 2) uc visible 보조 경로
+    try:
+        import undetected_chromedriver as uc
+        _cv = _get_chrome_major()
+        _uc_kw = {"version_main": _cv} if _cv else {}
+        for use_profile in (True, False):
+            driver = None
+            try:
+                opts = uc.ChromeOptions()
+                opts.add_argument("--no-sandbox")
+                opts.add_argument("--disable-dev-shm-usage")
+                opts.add_argument("--window-size=1280,900")
+                if use_profile and os.path.isdir(user_data):
+                    opts.add_argument(f"--user-data-dir={user_data}")
+                    opts.add_argument("--profile-directory=Default")
+                driver = uc.Chrome(options=opts, headless=False, **_uc_kw)
+                driver.set_page_load_timeout(timeout)
+                driver.get("about:blank")
+                _navigate_via_omnibox(driver, url)
+                _t3.sleep(3)
+                labels = list(_LOGIN_LABELS)
+                if click_button and click_button.lower() not in labels:
+                    labels.insert(0, click_button.lower())
+                _click_labels_4(driver, labels, wait_sec=0)
+                if manual_wait_sec > 0:
+                    logging.info("[CHROME-VIS-UC] 물리적 클릭/로그인 대기 %ss: %s", manual_wait_sec, url)
+                    _t3.sleep(manual_wait_sec)
+                text = _extract_page_text_4(driver)
+                if len(text.strip()) > 100:
+                    logging.info("[CHROME-VIS-UC] %s 성공 (%d chars, profile=%s)", url, len(text), use_profile)
+                    return text
+            except Exception as e:
+                if use_profile:
+                    continue
+                logging.warning("[CHROME-VIS-UC] %s 오류: %s", url, e)
+            finally:
+                if driver:
+                    try:
+                        driver.quit()
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+    return ""
+
+
+def _fetch_via_gui_automation_4(
+    url: str,
+    click_button: str | None = None,
+    manual_wait_sec: int = 25,
+) -> str:
+    """정식 Chrome 창을 열고 키보드/마우스 이벤트로 주소창 입력 후 화면 텍스트를 복사한다.
+    PAD 스타일 GUI 상호작용 우선 경로."""
+    import subprocess
+    import time as _t
+
+    chrome_bin = _get_chrome_binary_path()
+    if not chrome_bin:
+        return ""
+
+    try:
+        import pyautogui
+        import pyperclip
+        import pygetwindow as gw
+    except Exception as e:
+        logging.warning("[GUI-AUTO] pyautogui/pyperclip/pygetwindow import 실패: %s", e)
+        return ""
+
+    try:
+        subprocess.Popen([chrome_bin])
+        _t.sleep(2.5)
+
+        try:
+            chrome_windows = [w for w in gw.getAllTitles() if "Chrome" in w]
+            if chrome_windows:
+                win = gw.getWindowsWithTitle(chrome_windows[-1])[0]
+                win.activate()
+                _t.sleep(0.5)
+        except Exception:
+            pass
+
+        pyautogui.hotkey("ctrl", "l")
+        _t.sleep(0.2)
+        pyautogui.write(url, interval=0.015)
+        pyautogui.press("enter")
+        _t.sleep(3)
+
+        if manual_wait_sec > 0:
+            logging.info(
+                "[GUI-AUTO] %ss 동안 수동 조작 가능 — 필요하면 '%s' 버튼을 직접 눌러주세요: %s",
+                manual_wait_sec,
+                click_button or "login",
+                url,
+            )
+            _t.sleep(manual_wait_sec)
+
+        pyautogui.hotkey("ctrl", "a")
+        _t.sleep(0.2)
+        pyautogui.hotkey("ctrl", "c")
+        _t.sleep(0.5)
+        text = (pyperclip.paste() or "").strip()
+        if len(text) > 120:
+            logging.info("[GUI-AUTO] 텍스트 수집 성공 (%d chars)", len(text))
+            return text[:_MAX_PAGE_CHARS]
+    except Exception as e:
+        logging.warning("[GUI-AUTO] 실패: %s", e)
+
+    return ""
+
+
+def _chrome_click_and_extract_4(driver, click_button, wait_sec: int = 2) -> str:
+    """공통 클릭+텍스트추출 헬퍼"""
+    import time as _t
+    from selenium.webdriver.common.by import By
+    _t.sleep(wait_sec)
+    if click_button:
+        try:
+            xpath = (
+                "//*[contains(translate(text(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ',"
+                "'abcdefghijklmnopqrstuvwxyz')," + repr(click_button.lower()) + ")]"
+            )
+            for el in driver.find_elements(By.XPATH, xpath):
+                if el.is_displayed() and el.tag_name in ("a", "button"):
+                    el.click()
+                    _t.sleep(2)
+                    break
+        except Exception:
+            pass
+    soup = BeautifulSoup(driver.page_source, "lxml")
+    for tag in soup(["script", "style", "nav", "footer", "header", "aside", "iframe"]):
+        tag.decompose()
+    area = (
+        soup.find("main")
+        or soup.find(id=re.compile(r"(main|content|primary)", re.I))
+        or soup.find("article")
+        or soup.body
+        or soup
+    )
+    text = area.get_text(separator="\n", strip=True)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    return text.strip()[:_MAX_PAGE_CHARS]
+
+
+def fetch_url_chrome(url: str, click_button: str | None = None, timeout: int = 25) -> str:
+    """Cloudflare/봇감지 우회 우선(undetected-chromedriver), 실패 시 일반 selenium 폴백.
+    JS 렌더링 포털 페이지 스크레이핑용."""
+    import time as _t
+
+    # ── 0차: GUI 직접 상호작용(PAD 스타일) 우선 ─────────────────────────
+    manual_wait = int(os.getenv("CHROME_MANUAL_WAIT_SEC", "25"))
+    if os.getenv("USE_GUI_AUTOMATION", "true").lower() == "true":
+        gui_text = _fetch_via_gui_automation_4(
+            url,
+            click_button=click_button,
+            manual_wait_sec=manual_wait,
+        )
+        if gui_text:
+            return gui_text
+
+    # ── 1차: undetected-chromedriver (Cloudflare 우회) ─────────────────────
+    try:
+        import undetected_chromedriver as uc
+        opts2 = uc.ChromeOptions()
+        opts2.add_argument("--no-sandbox")
+        opts2.add_argument("--disable-dev-shm-usage")
+        _cv = _get_chrome_major()
+        driver = uc.Chrome(options=opts2, headless=True, **({"version_main": _cv} if _cv else {}))
+        try:
+            driver.set_page_load_timeout(timeout)
+            driver.get(url)
+            _t.sleep(3)
+            title = driver.title
+            text = _chrome_click_and_extract_4(driver, click_button, wait_sec=0)
+            if not _is_cloudflare_blocked(title, text) and len(text.strip()) > 200:
+                logging.info("[CHROME-UC] %s 성공 (%d chars)", url, len(text))
+                return text
+            logging.warning("[CHROME-UC] %s — CF감지 or 빈응답, selenium 폴백", url)
+        finally:
+            try:
+                driver.quit()
+            except Exception:
+                pass
+    except ImportError:
+        pass
+    except Exception as e:
+        logging.warning("[CHROME-UC] %s 오류: %s — selenium 폴백", url, e)
+
+    # ── 2차: 일반 selenium headless ChromeDriver ───────────────────────────
+    try:
+        from selenium import webdriver
+        from selenium.webdriver.chrome.options import Options
+        from selenium.webdriver.chrome.service import Service
+        from webdriver_manager.chrome import ChromeDriverManager
+
+        opts = Options()
+        opts.add_argument("--headless=new")
+        opts.add_argument("--no-sandbox")
+        opts.add_argument("--disable-dev-shm-usage")
+        opts.add_argument("--disable-gpu")
+        opts.add_argument(
+            "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        )
+        driver = webdriver.Chrome(
+            service=Service(ChromeDriverManager().install()),
+            options=opts,
+        )
+        try:
+            driver.set_page_load_timeout(timeout)
+            driver.get(url)
+            text = _chrome_click_and_extract_4(driver, click_button)
+            title = driver.title or ""
+            if not _is_cloudflare_blocked(title, text) and len(text.strip()) > 200:
+                logging.info("[CHROME-STD] %s 성공 (%d chars)", url, len(text))
+                return text
+            logging.warning("[CHROME-STD] %s — 차단/빈응답 감지, visible fallback", url)
+        finally:
+            driver.quit()
+    except ImportError:
+        logging.warning("[CHROME] selenium 미설치 — 3차 visible fallback 시도")
+    except Exception as e:
+        logging.warning("[CHROME-STD] %s 오류: %s — visible fallback", url, e)
+
+    # ── 3차: 실제 Chrome 창(headless=False) + 사용자 프로파일 + 버튼 클릭 ─────
+    logging.info("[CHROME-VIS] %s — 실제 창으로 시도 (수동 클릭 대기 포함)", url)
+    text = _fetch_visible_chrome_4(
+        url,
+        click_button=click_button,
+        timeout=timeout,
+        manual_wait_sec=manual_wait,
+    )
+    if text:
+        return text
+
+    logging.warning("[CHROME] %s — 모든 방법 실패", url)
+    return ""
+
+
 def fetch_university_pages(uni_key: str) -> list[dict]:
-    """레지스트리에서 해당 대학의 모든 공식 URL을 스크래핑하여 결과 리스트 반환."""
+    """레지스트리에서 해당 대학의 모든 공식 URL + 포털을 스크래핑하여 결과 리스트 반환."""
     meta = UNIVERSITY_REGISTRY.get(uni_key, {})
     if not meta:
         return []
 
     results = []
+
+    # 1) 공식 정보 페이지 (httpx)
     for url in meta.get("urls", []):
         text, final_url = fetch_url(url)
         if text.strip():
@@ -251,8 +731,27 @@ def fetch_university_pages(uni_key: str) -> list[dict]:
                 "university": meta["name"],
                 "url":        final_url,
                 "text":       text,
+                "source":     "official",
             })
-        time.sleep(0.4)  # 서버 부하 방지
+        time.sleep(0.4)
+
+    # 2) 포털 페이지 — use_chrome=True인 경우 Selenium 사용
+    for portal in meta.get("portals", []):
+        p_url = portal.get("url", "")
+        if not p_url:
+            continue
+        if portal.get("use_chrome"):
+            text = fetch_url_chrome(p_url, click_button=portal.get("click_button"))
+        else:
+            text, _ = fetch_url(p_url)
+        if text.strip():
+            results.append({
+                "university": meta["name"],
+                "url":        p_url,
+                "text":       text,
+                "source":     "portal_chrome" if portal.get("use_chrome") else "portal",
+            })
+        time.sleep(0.4)
 
     return results
 

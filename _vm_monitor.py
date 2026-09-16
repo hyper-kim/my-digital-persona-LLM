@@ -55,12 +55,19 @@ _stop_event = threading.Event()
 
 
 # ── 유틸 ──────────────────────────────────────────────────────────────
-def _tail(path: str, n: int = 120) -> list[str]:
+def _read_new_lines(path: str, pos: int) -> tuple[list[str], int]:
+    """pos 오프셋 이후 새로 추가된 줄만 반환. (pos, new_pos) 튜플 반환."""
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as f:
-            return f.readlines()[-n:]
+            f.seek(pos)
+            new_lines = f.readlines()
+            new_pos = f.tell()
+        return new_lines, new_pos
     except Exception:
-        return []
+        try:
+            return [], os.path.getsize(path)
+        except Exception:
+            return [], pos
 
 
 def folder_has_images(folder: str) -> bool:
@@ -106,6 +113,11 @@ def monitor_loop():
     vm_state     = "UNKNOWN"   # RUNNING / TERMINATED / UNKNOWN
     consec_fail  = 0
     _start_backoff_until = 0.0  # Spot 리소스 부족 시 재시도 유예 시각
+    # 로그 파일 오프셋 — 기동 시점 이전의 과거 기록은 무시
+    try:
+        _log_pos = os.path.getsize(LOG_FILE)
+    except Exception:
+        _log_pos = 0
 
     logging.info(f"VM 모니터 시작 | VM={VM_NAME or '미설정'} ZONE={VM_ZONE or '미설정'} "
                  f"IDLE_TIMEOUT={IDLE_TIMEOUT//60}분 AUTO_STOP={VM_AUTO_STOP}")
@@ -115,9 +127,9 @@ def monitor_loop():
 
     while not _stop_event.wait(CHECK_INTERVAL):
         now = time.time()
-        lines = _tail(LOG_FILE, 120)
+        lines, _log_pos = _read_new_lines(LOG_FILE, _log_pos)
 
-        # GCP 활동 집계
+        # GCP 활동 집계 (새로 추가된 줄만)
         success = sum(1 for ln in lines if RE_GCP_SUCCESS.search(ln)
                                         or RE_GCP_SENT.search(ln))
         fail    = sum(1 for ln in lines if RE_GCP_FAIL.search(ln))

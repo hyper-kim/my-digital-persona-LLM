@@ -38,6 +38,9 @@ Google Drive(OneNote/Drive 파일) → 수집 → Qdrant 벡터DB → 편입 상
   - SEARCH_MODEL: `gemma3:12b` (env로 변경 가능)
   - ADVISOR_MODEL: `qwen3:14b` (한국어 최강)
   - 설치된 모델: `qwen3:14b`, `gemma3:12b`, `llama3.2-vision:11b`, `qwen3-vl:8b`
+- **VM OCR 모델**: `llava:7b` (기본값, `VISION_MODEL` env)
+  - ⚠️ `qwen3-vl:8b` 사용 불가: `qwen3-vl-thinking` 파서 버그 — 항상 `!!!!!(31자)` 출력 + `done: False`
+  - VM ollama 서버: **0.19.0** (2026-03-31 업그레이드)
 - **벡터DB**: Qdrant (로컬 SQLite, 컬렉션명: `omni_persona_v3`)
   - 경로: `qdrant_db/` — 24.8GB SQLite, 로드 30초 타임아웃 적용
 - **임베딩**: `intfloat/multilingual-e5-large`
@@ -146,11 +149,12 @@ PDF_CHUNK_PAGES=5                   # 기본값 30 → 5로 축소 (최대 병�
 > 이 섹션은 대화 컨텍스트에서만 알 수 있는 "지금 어디까지 했는지" 정보입니다.  
 > 파일만 봐서는 알 수 없는 내용이므로 새 세션 시작 시 반드시 확인하세요.
 
-### VM 상태 (2026-03-29 기준)
-- `mydigitalpersonaembedder` RUNNING, **현재 IP `34.24.238.116`** (`.env` 업데이트 완료)
+### VM 상태 (2026-03-31 기준)
+- `mydigitalpersonaembedder` RUNNING, **현재 IP `34.75.63.124`** (`.env` 업데이트 완료)
 - **GPU 드라이버 정상**: nvidia-smi NVIDIA L4, CUDA 13.2 확인됨
-- **qwen3-vl:8b 모델** pull 완료 확인 (`ollama list` 6.1GB 표시됨)
-- GCP Ops Agent 설치 완료 (기본 hostmetrics 수집 중)
+- **ollama 서버 버전**: `0.19.0` (2026-03-31 업그레이드 — 구버전 0.6.1에서 qwen3-vl:8b 작동 불가)
+- **설치된 모델**: `llava:7b` (OCR 실무용), `qwen3-vl:8b` (사용 불가 — 버그)
+- ⚠️ `qwen3-vl:8b` 버그 확인: 모든 요청에 `!!!!!(31자)` thinking 토큰만 리턴 + `done: False`
 - ⚠️ VM 재시작마다 External IP가 바뀜 → `_autopilot.py`가 5분마다 자동 감지/업데이트
 
 ### 오토파일럿 시스템 (2026-03-29 추가, commit 4bf509d)
@@ -164,8 +168,9 @@ PDF_CHUNK_PAGES=5                   # 기본값 30 → 5로 축소 (최대 병�
 - **`sequential_run.py`** — 시작 시 autopilot 자동 백그라운드 실행 (`start_autopilot()`)
 - 로그: `autopilot.log`
 
-### 파이프라인 진행도 (2026-03-29 17:27 기준)
-- `processed_files.db` 처리완료: **11,442건**, 실패: **253건** (대부분 연결오류 → autopilot이 자동 정리)
+### 파이프라인 진행도 (2026-03-31 기준)
+- `processed_files.db` 처리완료: **3,475건+**, 실패: **27건**
+- ⚠️ 이전 `11,442건`은 다른 DB였음 (리셋 후 재시작 — 현재 DB 기준)
 - 한성과고 10,140건 완전 완료 (미처리 0건)
 - 현재 단계: `해외 대학 편입 정리` 전체 폴더 처리 중 → 완료 후 `Takeout` (376GB zip) 자동 진행
 - Takeout 폴더: `G:\내 드라이브\Takeout` (13개 zip, ~376GB) — sequential_run.py 3단계에 이미 포함
@@ -175,6 +180,12 @@ PDF_CHUNK_PAGES=5                   # 기본값 30 → 5로 축소 (최대 병�
 - `gemma3:12b` 한국어 직접 테스트 결과: **영어로만 응답** (한국어 구사 불가 수준)
   - `.env` `SEARCH_MODEL=qwen3:14b`로 변경 필요 — **아직 미수정**
   - `qwen3:14b`는 로컬에 설치됨 (8.2GB), 즉시 교체 가능
+- **`qwen3-vl:8b` OCR 완전 파손** (2026-03-31 확인):
+  - raw HTTP 확인: 모든 요청에서 `!!!!!(31자)` thinking 토큰 + `done: false` 리턴
+  - `RENDERER qwen3-vl-thinking` + `PARSER qwen3-vl-thinking` 파서 버그
+  - ollama 0.6.1 → 0.19.0 업그레이드 후에도 동일 증상
+  - **해결**: `VISION_MODEL=llava:7b`로 교체 (기본값 변경 완료)
+  - `llava:7b` 테스트: `done: True | stop` + 실제 이미지 설명 정상 출력
 - Cornell IRP / UPenn catalog 크롤: 200 OK지만 **JS 렌더링 필요 페이지** → httpx로는 빈 HTML
   - 실질적 편입 데이터 없음 → 대체 URL 또는 Playwright 도입 검토 필요
 

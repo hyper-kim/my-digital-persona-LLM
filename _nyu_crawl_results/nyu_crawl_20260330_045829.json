@@ -1,0 +1,30 @@
+{
+  "source_url": "https://connect.nyu.edu/portal/undergraduate/tab=welcome",
+  "title": "사용자 계정 로그인",
+  "pages": [
+    {
+      "title": "사용자 계정 로그인",
+      "url": "https://login.microsoftonline.com/665be5ef-3fc6-401b-b6c4-401a9d9c7b72/saml2?SAMLRequest=fVLLbtswEPwVgneJEi0pNmE5cGMUNZA2RqTkkEtBUquYAB8uSaXN35d%2BFeklN2I5O7szs8vbP0ajN%2FBBOdviMi8wAivdoOxri5%2F6r9kc366WgRtND2w9xb19hF8ThIhSow3s%2FNPiyVvmeFCBWW4gsChZt%2F5%2Bz2hesIN30UmnMVqHAD6mUXfOhsmA78C%2FKQlPj%2Fct3sd4CIyQsFdCOA1xn9v3KYdhImo4kMQyKg3ktAQ5klOye%2Bh60nUPGG3SSsryeJJxZdLuVdncKOldcGN0VisLuXSGNE0toIYxm42yyaqiFJloZHV88cWwkDfihpKTNoy2mxb%2FrIuKivlQ8ZGXtBFUDnUpUkEOlRgoFwkWwgRbGyK3scW0oE1WzDK66MsFq%2BesaPJZU75gtLu48UXZs8ufWSfOoMC%2B9f0uO8rF6PmaVgLgSzbsNN1%2FDOVzYn5NAq%2BOMMMlMJWCN8ZZdrF9ST5y%2F7uCH4lsu9k5reQ7Wmvtft954BFaHP0EmKwuff%2Ffy%2Bov&RelayState=e1s1&sso_reload=true",
+      "tables": [],
+      "list_items": [],
+      "paragraphs": [
+        "ATTENTION:Do not use your personal email.",
+        "Sign in with your NetID followed by @nyu.edu (NetID@nyu.edu), then your NYU password.Need Help?",
+        "Review troubleshooting tips, includinghow to trust this is the real NYU Login.",
+        "By logging in, you agree to abide by thePolicy on Responsible Use of NYU Computers and Data.",
+        "When using a public or shared computer, quitting your browser does not securely log you out.You must sign or log out of your NYU account."
+      ],
+      "text_length": 525
+    }
+  ],
+  "tables": [],
+  "links": [],
+  "transfer_info": {
+    "total_pages": 1,
+    "total_tables": 0,
+    "total_links_visited": 0,
+    "data_sources": [
+      "사용자 계정 로그인"
+    ]
+  }
+}

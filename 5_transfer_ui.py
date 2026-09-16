@@ -2,7 +2,7 @@
 5_transfer_ui.py — 미국 명문대 편입 통합 UI (7_unified_agent 연동)
 =================================================================
 두 탭 모두 7_unified_agent.stream_unified() 기반 스트리밍 챗봇.
- · [팩트체크]   — 검색 키워드 → gemma3:12b (temp=0)
+ · [팩트체크]   — 검색 키워드 → qwen3:14b (temp=0)
  · [어드바이저] — 분석 키워드 → qwen3:14b  (temp=0.6)
  · Intent 라우팅은 7_unified_agent 내부가 자동 처리
 
@@ -12,7 +12,10 @@
 
 import sys
 import os
+import json
+import uuid
 import textwrap
+from datetime import datetime
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -38,6 +41,8 @@ FACTCHECK_QUESTIONS = [
     ("★ 코넬 마감·서류",      "Cornell 편입 Fall 2026 마감일, 필요 서류, SAT 면제 요건"),
     ("★ 코넬 TOEFL·DET",     "Cornell 국제 편입 TOEFL 최저 + Duolingo 허용 여부"),
     ("★ 4개 학교 요건 비교",  "Cornell·Stanford·NYU·UPenn 편입 요건 한눈에 비교"),
+    ("입학처 메일 반영",       "최근 대학에서 온 메일 내용까지 반영해서 Cornell 요건 업데이트해줘"),
+    ("미확인 항목 문의초안",   "공식 사이트에 없는 항목은 입학처 문의 메일 초안까지 만들어줘"),
     ("SAT 면제 대학",         "SAT 없이 지원 가능한 편입 대학 목록"),
     ("듀오링고 허용 여부",    "Duolingo DET를 허용하는 상위권 편입 대학"),
     ("TOEFL 85 충분한가",     "TOEFL 85로 지원 가능한 대학과 불가능한 대학"),
@@ -78,6 +83,13 @@ def health_check() -> str:
 
 def _profile_md() -> str:
     p = ua.USER_PROFILE
+    primary_keys = list(getattr(ua, "PRIMARY_UNIVERSITY_KEYS", p["applied"][:4]))
+    candidate_keys = p["applied"][len(primary_keys):]
+
+    def format_names(keys: list[str], chunk_size: int = 3) -> str:
+        names = [ua.UNIVERSITY_REGISTRY.get(key, {}).get("name", key.replace("_", " ").title()) for key in keys]
+        return "<br>".join(", ".join(names[idx:idx + chunk_size]) for idx in range(0, len(names), chunk_size))
+
     return textwrap.dedent(f"""
     ### 👤 내 프로필
     | 항목 | 값 |
@@ -90,11 +102,11 @@ def _profile_md() -> str:
     | SAT/ACT | 🔴 **{p['sat']}** |
     | 이수 학점 | {p['credits']} |
 
-    ### 지원 대학 ★
-    - 🥇 Cornell
-    - Stanford
-    - NYU
-    - UPenn
+    ### 지원 완료 ★
+    {format_names(primary_keys)}
+
+    ### 추가 후보군 ({len(candidate_keys)})
+    {format_names(candidate_keys, chunk_size=2)}
     """).strip()
 
 
@@ -210,6 +222,48 @@ def do_send_email(provider: str = "auto") -> str:
     return f"❌ 발송 실패: {result['error']}"
 
 
+def stream_rec_ui(
+    professor_name: str,
+    professor_email: str,
+    course_name: str,
+    semester: str,
+    episode: str,
+    schools_deadlines: str,
+    language: str,
+    followup: bool,
+):
+    """추천서 요청 전용 초안 스트리밍"""
+    if not professor_name.strip():
+        yield "❗ 교수님/선생님 성함을 입력해주세요."
+        return
+    if not schools_deadlines.strip():
+        yield "❗ 지원 대학 및 마감일을 입력해주세요."
+        return
+
+    user_msg, req = em.build_rec_request_message(
+        professor_name=professor_name.strip(),
+        professor_email=professor_email.strip(),
+        course_name=course_name.strip(),
+        semester=semester.strip(),
+        episode=episode.strip(),
+        schools_deadlines=schools_deadlines.strip(),
+        language=language,
+        followup=followup,
+    )
+    result = ""
+    for token in em.stream_compose(req):
+        result += token
+        yield result
+    subject, body = em.extract_subject_and_body(result)
+    _last_draft.update({
+        "subject": subject,
+        "body": body,
+        "to": professor_email.strip() or "(수신자 미정)",
+        "type": req.email_type,
+        "provider": "auto",
+    })
+
+
 def load_inbox(from_filter: str = "", provider: str = "auto") -> str:
     msgs = em.read_inbox(10, from_filter, provider=provider)
     return em.format_inbox(msgs)
@@ -221,6 +275,82 @@ def load_important_inbox_summary(provider: str = "gmail") -> str:
 
 def load_email_history() -> str:
     return em.format_history(em.get_send_history(20))
+
+
+def enqueue_autopilot_command(
+    action: str,
+    note: str,
+    env_key: str,
+    env_value: str,
+) -> str:
+    """UI 입력을 오토파일럿 명령 큐(JSON 파일)로 등록"""
+    action = (action or "note").strip()
+    note = (note or "").strip()
+    env_key = (env_key or "").strip()
+    env_value = (env_value or "").strip()
+
+    if action == "set_env":
+        if not env_key:
+            return "❌ set_env는 ENV KEY가 필요합니다."
+        if not env_value:
+            return "❌ set_env는 ENV VALUE가 필요합니다."
+    elif action == "note" and not note:
+        return "❌ note 액션은 지시 내용을 입력해주세요."
+
+    cmd_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "autopilot_commands")
+    os.makedirs(cmd_dir, exist_ok=True)
+
+    cmd = {
+        "id": str(uuid.uuid4()),
+        "created_at": datetime.now().isoformat(),
+        "source": "ui",
+        "action": action,
+        "payload": {
+            "note": note,
+            "key": env_key,
+            "value": env_value,
+        },
+    }
+    out_name = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{cmd['id'][:8]}.json"
+    out_path = os.path.join(cmd_dir, out_name)
+
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(cmd, f, ensure_ascii=False, indent=2)
+
+    return f"✅ 오토파일럿 명령 등록 완료: {out_name}"
+
+
+def read_autopilot_status() -> str:
+    base = os.path.dirname(os.path.abspath(__file__))
+    log_path = os.path.join(base, "autopilot.log")
+    cmd_dir = os.path.join(base, "autopilot_commands")
+    done_dir = os.path.join(base, "autopilot_commands_done")
+
+    parts: list[str] = []
+    parts.append("[AUTOPILOT LOG - LAST 30 LINES]")
+    if os.path.exists(log_path):
+        with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+        parts.append("".join(lines[-30:]).strip() or "(log empty)")
+    else:
+        parts.append("autopilot.log 없음")
+
+    pending = sorted([
+        fn for fn in os.listdir(cmd_dir)
+        if fn.lower().endswith(".json")
+    ]) if os.path.exists(cmd_dir) else []
+    done = sorted([
+        fn for fn in os.listdir(done_dir)
+        if fn.lower().endswith(".json")
+    ]) if os.path.exists(done_dir) else []
+
+    parts.append("\n[PENDING COMMANDS]")
+    parts.append("\n".join(pending[-10:]) if pending else "(none)")
+
+    parts.append("\n[RECENT COMPLETED COMMANDS]")
+    parts.append("\n".join(done[-10:]) if done else "(none)")
+
+    return "\n".join(parts)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -235,6 +365,8 @@ def build_ui():
             f"**{ua.SEARCH_MODEL}** (팩트·temp=0) ＋ **{ua.ADVISOR_MODEL}** (전략·temp={ua.ADVISOR_TEMPERATURE})"
             " · Intent 자동 라우팅"
         )
+        with gr.Accordion("📌 지원 대학별 공식 기준 소스", open=True):
+            gr.Markdown(ua.get_official_source_policy_markdown(applied_only=True))
 
         with gr.Tabs():
 
@@ -458,6 +590,91 @@ def build_ui():
             with gr.TabItem("✉️ 이메일 커뮤니케이션"):
                 with gr.Tabs():
 
+                    # ── 추천서 전용 탭 ──────────────────────────────────
+                    with gr.TabItem("📝 추천서 초안"):
+                        gr.Markdown(
+                            "> **이메일 계정 없어도 초안 작성 가능합니다.** "
+                            "작성된 초안을 복사해서 직접 발송하거나, 아래 '✉️ 작성+발송' 탭에서 바로 발송하세요."
+                        )
+                        with gr.Row(equal_height=False):
+                            with gr.Column(scale=1, min_width=240):
+                                gr.Markdown("### 📋 추천인 정보")
+                                rec_prof_name = gr.Textbox(
+                                    label="교수님/선생님 성함 (필수)",
+                                    placeholder="예) 김철수 교수님 / Prof. Kim",
+                                )
+                                rec_prof_email = gr.Textbox(
+                                    label="이메일 (선택 — 없으면 초안만 생성)",
+                                    placeholder="professor@korea.ac.kr",
+                                )
+                                rec_course = gr.Textbox(
+                                    label="수강 과목명",
+                                    placeholder="예) 인공지능 기초론",
+                                )
+                                rec_semester = gr.Textbox(
+                                    label="수강 학기",
+                                    placeholder="예) 2025년 1학기",
+                                )
+                                rec_language = gr.Radio(
+                                    choices=["korean", "english"],
+                                    value="korean",
+                                    label="이메일 작성 언어",
+                                )
+                                rec_followup = gr.Checkbox(
+                                    label="Follow-up (제출 확인 이메일)",
+                                    value=False,
+                                )
+
+                            with gr.Column(scale=2):
+                                rec_episode = gr.Textbox(
+                                    label="기억에 남는 에피소드 / 수업에서 한 일",
+                                    placeholder=(
+                                        "예) 기말 프로젝트에서 개인 LLM 파이프라인을 구현해 "
+                                        "교수님께 긍정적인 피드백을 받았습니다. "
+                                        "특히 멀티에이전트 설계 과정에서 논문 기반 아이디어를 직접 구현한 점을 언급해주시면 좋겠습니다."
+                                    ),
+                                    lines=4,
+                                )
+                                rec_schools = gr.Textbox(
+                                    label="지원 대학 및 마감일 (학교당 한 줄)",
+                                    placeholder=(
+                                        "Cornell University — 2026-04-01\n"
+                                        "Stanford University — 2026-04-01\n"
+                                        "NYU — 2026-03-15\n"
+                                        "UPenn — 2026-04-01"
+                                    ),
+                                    lines=5,
+                                    value=(
+                                        "Cornell University — 2026-04-01\n"
+                                        "Stanford University — 2026-04-01\n"
+                                        "NYU — 2026-03-15\n"
+                                        "UPenn — 2026-04-01"
+                                    ),
+                                )
+                                with gr.Row():
+                                    rec_draft_btn  = gr.Button("🤖 추천서 이메일 초안 작성", variant="primary", size="lg", scale=3)
+                                    rec_send_btn   = gr.Button("📤 초안으로 발송", variant="stop", size="lg", scale=1)
+                                rec_draft_out = gr.Textbox(
+                                    label="초안 미리보기 + 코치 노트 (복사해서 직접 발송 가능)",
+                                    lines=20, max_lines=45, interactive=True,
+                                )
+                                rec_send_result = gr.Textbox(label="발송 결과", lines=3, interactive=False)
+                                gr.Markdown(
+                                    "> 💡 **초안 복사 후 직접 발송**: 이메일 계정 미설정 시 오른쪽 위 📋 버튼으로 복사  \n"
+                                    "> 💡 **직접 발송**: 교수님 이메일 입력 후 `초안으로 발송` 클릭 (이메일 계정 필요)"
+                                )
+
+                        rec_draft_btn.click(
+                            fn=stream_rec_ui,
+                            inputs=[rec_prof_name, rec_prof_email, rec_course, rec_semester,
+                                    rec_episode, rec_schools, rec_language, rec_followup],
+                            outputs=rec_draft_out,
+                        )
+                        rec_send_btn.click(
+                            fn=lambda prov="auto": do_send_email(prov),
+                            outputs=rec_send_result,
+                        )
+
                     with gr.TabItem("✏️ 작성 + 발송"):
                         with gr.Row(equal_height=False):
                             with gr.Column(scale=1, min_width=220):
@@ -509,15 +726,15 @@ def build_ui():
                                     email_send_btn  = gr.Button("📤 실제 발송", variant="stop", size="lg", scale=1)
 
                                 email_draft_out = gr.Textbox(
-                                    label="이메일 초안 미리보기 + 코치 노트",
-                                    lines=18, max_lines=40, interactive=False,
+                                    label="이메일 초안 미리보기 + 코치 노트 (📋 복사 버튼 → 직접 발송 가능)",
+                                    lines=18, max_lines=40, interactive=True,
                                 )
                                 send_result_out = gr.Textbox(
                                     label="발송 결과", lines=3, interactive=False,
                                 )
                                 gr.Markdown(
-                                    "> ⚠️ **Gmail 앱 비밀번호 필요**: "
-                                    "`GMAIL_USER` + `GMAIL_APP_PASSWORD` 환경변수 또는 `.env` 파일 설정  \n"
+                                    "> 📋 **초안만 필요할 때**: 이메일 계정 설정 없이도 초안이 생성됩니다. 오른쪽 위 복사 버튼으로 복사  \n"
+                                    "> ⚠️ **실제 발송 시**: `GMAIL_USER` + `GMAIL_APP_PASSWORD` 환경변수 또는 `.env` 설정 필요  \n"
                                     "> 발급: https://myaccount.google.com/apppasswords"
                                 )
 
@@ -529,9 +746,9 @@ def build_ui():
                                         ("Stanford 일정 문의", "inquiry", "stanford",
                                          "admission@stanford.edu", "",
                                          "Transfer application timeline and interview process for Fall 2026"),
-                                        ("교수님 추천서 요청", "rec_request", "선택",
+                                        ("교수님 추천서 요청 (영문, 간단)", "rec_request", "선택",
                                          "", "Prof. [NAME]",
-                                         "Cornell/Stanford 전후로 제출할 추천서 요청\n마감: 2026-04-01\n수업명: AI 기초론\n기억에 남는 프로젝트: 개인 LLM 업하 프로젝트"),
+                                         "Cornell/Stanford/NYU/UPenn 편입 추천서 요청\n마감: 2026-04-01\n수업명: AI 기초론\n기억에 남는 프로젝트: 개인 LLM 파이프라인 구현\n※ 구조화된 초안은 '📝 추천서 초안' 탭을 이용하세요."),
                                     ]
                                     for _lbl, _et, _sc, _to, _rn, _tp in _email_presets:
                                         _btn = gr.Button(_lbl, size="sm")
@@ -584,6 +801,73 @@ def build_ui():
                         hist_refresh = gr.Button("🔄 발송 이력 새로고침")
                         hist_out = gr.Textbox(label="발송 이력", lines=20, interactive=False)
                         hist_refresh.click(fn=load_email_history, outputs=hist_out)
+
+            # ──────────────────────────────────────────────────────────────
+            # 탭 5: 오토파일럿 지시
+            # ──────────────────────────────────────────────────────────────
+            with gr.TabItem("🧭 오토파일럿 지시"):
+                gr.Markdown(
+                    "### 오토파일럿 명령 큐\n"
+                    "UI에서 명령을 등록하면 `_autopilot.py`가 30초 주기로 자동 실행합니다.\n"
+                    "- `set_env`: 허용된 키만 변경\n"
+                    "- `restart_ingest`: 인제스트 재시작 트리거\n"
+                    "- `refresh_vm_ip`: VM IP 강제 동기화\n"
+                    "- `clear_conn_errors`: 연결오류 실패 재처리 큐 복귀\n"
+                    "- `restart_ui`: UI 재시작\n"
+                    "- `note`: 자유 지시 메모"
+                )
+                with gr.Row(equal_height=False):
+                    with gr.Column(scale=1, min_width=260):
+                        ap_action = gr.Dropdown(
+                            choices=[
+                                "note",
+                                "refresh_vm_ip",
+                                "clear_conn_errors",
+                                "restart_ingest",
+                                "restart_ui",
+                                "set_env",
+                            ],
+                            value="note",
+                            label="명령 액션",
+                        )
+                        ap_note = gr.Textbox(
+                            label="지시 내용 (note에서 필수)",
+                            placeholder="예) Cornell 포털 우선 분석 모드로 점검",
+                            lines=3,
+                        )
+                        ap_env_key = gr.Dropdown(
+                            choices=[
+                                "SEARCH_MODEL",
+                                "ADVISOR_MODEL",
+                                "ADVISOR_TEMPERATURE",
+                                "USE_LLM_FOR_INQUIRY_DRAFT",
+                                "AUTO_SEND_CRITICAL_EMAIL",
+                            ],
+                            value="SEARCH_MODEL",
+                            label="ENV KEY (set_env용)",
+                        )
+                        ap_env_val = gr.Textbox(
+                            label="ENV VALUE (set_env용)",
+                            placeholder="예) qwen3:14b",
+                        )
+                        with gr.Row():
+                            ap_submit = gr.Button("✅ 명령 등록", variant="primary", scale=1)
+                            ap_refresh = gr.Button("🔄 상태 새로고침", scale=1)
+
+                    with gr.Column(scale=2):
+                        ap_submit_result = gr.Textbox(label="등록 결과", lines=2, interactive=False)
+                        ap_status = gr.Textbox(label="오토파일럿 상태", lines=24, interactive=False)
+
+                ap_submit.click(
+                    fn=enqueue_autopilot_command,
+                    inputs=[ap_action, ap_note, ap_env_key, ap_env_val],
+                    outputs=ap_submit_result,
+                ).then(
+                    fn=read_autopilot_status,
+                    outputs=ap_status,
+                )
+                ap_refresh.click(fn=read_autopilot_status, outputs=ap_status)
+                app.load(fn=read_autopilot_status, outputs=ap_status)
 
     return app
 

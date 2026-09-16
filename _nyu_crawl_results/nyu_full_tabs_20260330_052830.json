@@ -1,0 +1,14 @@
+{
+  "source_url": "https://connect.nyu.edu/manage/login?realm=&r=/portal/undergraduate",
+  "timestamp": "2026-03-30T05:25:20.782369",
+  "tabs": {},
+  "all_tables": [],
+  "navigation_elements": [],
+  "detected_tabs": [],
+  "summary": {
+    "total_tabs_detected": 0,
+    "tabs_successfully_crawled": 0,
+    "total_tables_extracted": 0,
+    "unique_urls_visited": 0
+  }
+}

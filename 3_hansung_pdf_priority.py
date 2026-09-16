@@ -210,6 +210,8 @@ def _filter_abbyy_garbage(text: str) -> str:
 def task_abbyy_ocr_pages(file_path: str) -> Dict[int, str]:
     if not ABBYY_ENABLED or not WIN32COM_AVAILABLE:
         return {}
+    if os.path.splitext(file_path)[1].lower() != ".pdf":
+        return {}
     try:
         app = _win32com.Dispatch("FineReader.Application.16")
         doc = app.OpenDocument(file_path)
@@ -373,14 +375,19 @@ def process_scan_pdf(file_path: str, cpu_pool, gcp_pool) -> List[PageNode]:
     abs_path = os.path.abspath(file_path)
     stub = is_gdrive_stub(file_path)
 
-    abbyy_fut = cpu_pool.submit(task_abbyy_ocr_pages, file_path)
+    abbyy_fut = (
+        cpu_pool.submit(task_abbyy_ocr_pages, file_path)
+        if str(file_path).lower().endswith(".pdf")
+        else None
+    )
     gcp_fut   = gcp_pool.submit(task_gcp_ssh_ocr, file_path) if USE_GCP_SSH_OCR and not _CLOUD_DOWN.is_set() else None
 
     abbyy_pages: Dict[int, str] = {}
-    try:
-        abbyy_pages = abbyy_fut.result(timeout=300)
-    except Exception as e:
-        logging.error(f"[ABBYY-FUT] {file_path} | {e}")
+    if abbyy_fut is not None:
+        try:
+            abbyy_pages = abbyy_fut.result(timeout=300)
+        except Exception as e:
+            logging.error(f"[ABBYY-FUT] {file_path} | {e}")
 
     gcp_raw = ""
     if gcp_fut:
